@@ -1,14 +1,17 @@
 --!nocheck
 --[[
   ========================================================================================
-  🌸 PULL A LUCKY FISH — SAKURA CLEAN SUITE
+  🌸 PULL A LUCKY FISH — SAKURA PREMIUM AUTOMATION SUITE
   ========================================================================================
   Features:
-    1. 💰 Auto-Collect Cash   - Ultra-clean base plot collection loop
-    2. 🥚 Auto-Buy Eggs       - Buys all available in-game eggs (skips Robux Mythic Egg)
-    3. 📦 Auto-Buy Boxes      - Buys Float Crates & Functional Objects Crates
-    4. 🛑 Clean Teardown      - Closing the menu gracefully halts all background tasks
-    5. 🌸 Modern Fluent UI    - 100% English, sleek glassmorphism, responsive & smooth
+    1. 💰 Auto-Collect Cash      - Smooth loop collecting cash from all base plots
+    2. 🥚 Auto-Buy Eggs          - Buys all in-game eggs in stock (skips Robux Mythic Egg)
+    3. 📦 Auto-Buy Boxes         - Buys Float Crates & Functional Objects Crates
+    4. 🏷️ Auto-Buy Auction House - Buys hourly restock direct-buy items (no bids!)
+    5. ⏳ Auto Place & Open      - Places eggs & boxes on base by priority, waits for
+                                   timer, and automatically opens/hatches them
+    6. 🛑 Clean Teardown         - Gracefully terminates all background tasks upon closing
+    7. 🌸 Sleek Modern UI        - Full English, glassmorphism, responsive & minimizable
   ========================================================================================
 ]]
 
@@ -117,13 +120,22 @@ end
 -- 3. CONFIGURATION STATE
 -- ========================================================================================
 local Config = {
-    AutoCollectCash = true,
-    AutoBuyEggs     = true,
-    AutoBuyBoxes    = true,
+    -- Auto Collect Cash
+    AutoCollectCash     = true,
+
+    -- Auto Buy Shops
+    AutoBuyEggs         = true,
+    AutoBuyBoxes        = true,
+    AutoBuyAuctionHouse = false,
+
+    -- Auto Open & Hatch
+    AutoPlaceAndOpen    = true,
+    AutoSkipTimers      = true,
+    OpenPriority        = "HighTierFirst", -- "HighTierFirst", "EggsFirst", "BoxesFirst"
 }
 
 -- ========================================================================================
--- 4. AUTOMATION LOGIC
+-- 4. AUTOMATION LOGIC (FAST, STABLE & RESILIENT)
 -- ========================================================================================
 
 -- Cash Collection
@@ -151,13 +163,12 @@ local function buyEggs()
         local isSold = sold[slotIdx] == true
 
         if eggName and not isSold then
-            -- Skip Robux paid eggs
             if eggName ~= "MythicEgg" and not tostring(eggName):lower():find("mythic") then
                 fireRemote(Remotes.BuyEgg, slotIdx)
                 fireRemote(Remotes.BuyEgg, tostring(slotIdx))
                 fireRemote(Remotes.BuyEgg, eggName)
                 fireRemote(Remotes.BuyEgg, slotIdx, eggName)
-                task.wait(0.25)
+                task.wait(0.2)
             end
         end
     end
@@ -185,11 +196,10 @@ local function buyBoxes()
                 fireRemote(Remotes.BuyDecorationsStoreItem, slotIdx)
                 fireRemote(Remotes.BuyDecoration, "FunctionalObjectsCrate")
             end
-            task.wait(0.25)
+            task.wait(0.2)
         end
     end
 
-    -- Check decoration store for FunctionalObjectsCrate
     local decoStock = s.decorationsStoreStock or {}
     if decoStock["FunctionalObjectsCrate"] ~= 0 then
         fireRemote(Remotes.BuyDecorationsStoreItem, "FunctionalObjectsCrate")
@@ -198,8 +208,159 @@ local function buyBoxes()
     end
 end
 
--- Main Background Worker
+-- Auto Buy Auction House Direct-Buy Items (Every 1 Hour Restock, NO BIDS)
+local function buyAuctionHouseDirect()
+    if not Config.AutoBuyAuctionHouse then return end
+    fireRemote(Remotes.GetAuctionHouseState)
+
+    -- Classic & Limited fixed buy slots (slots 1 to 6)
+    for slotIdx = 1, 6 do
+        if not isRunning or not Config.AutoBuyAuctionHouse then break end
+        fireRemote(Remotes.AuctionBuy, slotIdx)
+        fireRemote(Remotes.AuctionBuy, tostring(slotIdx))
+        fireRemote(Remotes.AuctionBuy, { Slot = slotIdx })
+        task.wait(0.15)
+    end
+end
+
+-- ----------------------------------------------------------------------------------------
+-- 5. AUTO PLACE & OPEN (BOXES & EGGS BY PRIORITY)
+-- ----------------------------------------------------------------------------------------
+
+local RarityScore = {
+    ["MythicFloatCrate"]     = 100,
+    ["OceanEgg"]             = 90,
+    ["LegendaryFloatCrate"]  = 80,
+    ["EpicFloatCrate"]       = 70,
+    ["ForestEgg"]            = 60,
+    ["RareFloatCrate"]       = 50,
+    ["FarmEgg"]              = 40,
+    ["CommonFloatCrate"]     = 30,
+    ["FunctionalObjectsCrate"] = 25,
+    ["CatFloatCrate"]        = 20,
+}
+
+-- Check and Open/Hatch Ready Items on Base
+local function processPlacedItems()
+    local s = getState()
+
+    -- 1. Process Placed Eggs
+    local placedEggs = s.placedEggs or {}
+    for eggId, data in pairs(placedEggs) do
+        local remaining = (type(data) == "table" and (data.RemainingSeconds or data.Timer)) or 0
+        if remaining <= 0 or (type(data) == "table" and data.Ready) then
+            fireRemote(Remotes.HatchEgg, eggId)
+            fireRemote(Remotes.HatchEgg, tostring(eggId))
+        elseif Config.AutoSkipTimers then
+            fireRemote(Remotes.SkipEggTimer, eggId)
+        end
+    end
+
+    -- 2. Process Placed Lootboxes
+    local placedBoxes = s.placedLootboxes or {}
+    for boxId, data in pairs(placedBoxes) do
+        local remaining = (type(data) == "table" and (data.RemainingSeconds or data.Timer)) or 0
+        if remaining <= 0 or (type(data) == "table" and data.Ready) then
+            fireRemote(Remotes.OpenFloatLootbox, boxId)
+            fireRemote(Remotes.OpenFloatLootbox, tostring(boxId))
+            fireRemote(Remotes.ClaimFloatLootboxReward, boxId)
+        elseif Config.AutoSkipTimers then
+            fireRemote(Remotes.SkipFloatLootboxTimer, boxId)
+        end
+    end
+
+    -- Check BillboardGui timers in PlayerGui for instant responsiveness
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if pg then
+            for _, gui in ipairs(pg:GetChildren()) do
+                if gui:IsA("BillboardGui") and gui.Name:find("LootboxTimer_") then
+                    local id = gui.Name:gsub("LootboxTimer_", "")
+                    local isReady = false
+                    for _, lbl in ipairs(gui:GetDescendants()) do
+                        if lbl:IsA("TextLabel") and (lbl.Text == "Open" or lbl.Text == "Ready" or lbl.Text:find("0:00")) then
+                            isReady = true
+                            break
+                        end
+                    end
+                    if isReady then
+                        fireRemote(Remotes.OpenFloatLootbox, id)
+                        fireRemote(Remotes.ClaimFloatLootboxReward, id)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- Place Candidate Items from Inventory onto Base
+local function placeNextCandidate()
+    local s = getState()
+    local placedEggs = s.placedEggs or {}
+    local placedBoxes = s.placedLootboxes or {}
+
+    local totalPlaced = 0
+    for _ in pairs(placedEggs) do totalPlaced = totalPlaced + 1 end
+    for _ in pairs(placedBoxes) do totalPlaced = totalPlaced + 1 end
+
+    local maxLimit = s.placementLimitLevel or 3
+    if totalPlaced >= maxLimit then return end -- Base incubation slots full
+
+    -- Collect all placeable candidates from inventory
+    local inv = s.inventory or {}
+    local candidates = {}
+
+    for key, item in pairs(inv) do
+        if type(item) == "table" then
+            local name = item.ConfigName or tostring(key)
+            local count = tonumber(item.Stack) or 1
+            if count > 0 then
+                local isEgg = (item.Category == "Egg") or name:find("Egg")
+                local isBox = (item.Category == "FloatLootbox") or name:find("Crate") or name:find("Lootbox")
+
+                if isEgg and name ~= "MythicEgg" then
+                    table.insert(candidates, { Name = name, Type = "Egg", Score = RarityScore[name] or 35 })
+                elseif isBox then
+                    table.insert(candidates, { Name = name, Type = "Box", Score = RarityScore[name] or 25 })
+                end
+            end
+        end
+    end
+
+    if #candidates == 0 then return end
+
+    -- Sort candidates by chosen Priority Order
+    if Config.OpenPriority == "HighTierFirst" then
+        table.sort(candidates, function(a, b) return a.Score > b.Score end)
+    elseif Config.OpenPriority == "EggsFirst" then
+        table.sort(candidates, function(a, b)
+            if a.Type == b.Type then return a.Score > b.Score end
+            return a.Type == "Egg"
+        end)
+    elseif Config.OpenPriority == "BoxesFirst" then
+        table.sort(candidates, function(a, b)
+            if a.Type == b.Type then return a.Score > b.Score end
+            return a.Type == "Box"
+        end)
+    end
+
+    -- Place best candidate
+    local chosen = candidates[1]
+    if chosen.Type == "Egg" then
+        fireRemote(Remotes.PlaceEgg, chosen.Name)
+        fireRemote(Remotes.PlaceEgg, { ConfigName = chosen.Name })
+    else
+        fireRemote(Remotes.PlaceFloatLootbox, chosen.Name)
+        fireRemote(Remotes.PlaceFloatLootbox, { ConfigName = chosen.Name })
+        fireRemote(Remotes.OpenLuckyblock, chosen.Name)
+    end
+end
+
+-- ========================================================================================
+-- 6. MAIN BACKGROUND WORKER
+-- ========================================================================================
 task.spawn(function()
+    local auctionTimer = 0
     while isRunning and _G.__SAKURA_LUCKYFISH == CURRENT_SESSION do
         if Config.AutoCollectCash then
             pcall(collectCash)
@@ -210,12 +371,26 @@ task.spawn(function()
         if Config.AutoBuyBoxes then
             pcall(buyBoxes)
         end
+        if Config.AutoPlaceAndOpen then
+            pcall(processPlacedItems)
+            pcall(placeNextCandidate)
+        end
+
+        -- Check Auction House direct buy every 15 seconds
+        auctionTimer = auctionTimer + 1.5
+        if auctionTimer >= 15 then
+            auctionTimer = 0
+            if Config.AutoBuyAuctionHouse then
+                pcall(buyAuctionHouseDirect)
+            end
+        end
+
         task.wait(1.5)
     end
 end)
 
 -- ========================================================================================
--- 5. MODERN SAKURA UI (FULL ENGLISH, ULTRA SLEEK & COMPACT)
+-- 7. MODERN SAKURA UI (FULL ENGLISH, SLEEK & COMPACT)
 -- ========================================================================================
 local Theme = {
     Background = Color3.fromRGB(19, 14, 20),
@@ -238,14 +413,14 @@ ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = targetParent
 
--- Clean shutdown handler on destruction
+-- Teardown Hook
 table.insert(connections, ScreenGui.Destroying:Connect(cleanShutdown))
 
 -- Main Frame
 local Main = Instance.new("Frame")
 Main.Name = "SakuraMain"
-Main.Size = UDim2.new(0, 500, 0, 360)
-Main.Position = UDim2.new(0.5, -250, 0.5, -180)
+Main.Size = UDim2.new(0, 560, 0, 410)
+Main.Position = UDim2.new(0.5, -280, 0.5, -205)
 Main.BackgroundColor3 = Theme.Background
 Main.BorderSizePixel = 0
 Main.Active = true
@@ -356,7 +531,7 @@ end)
 
 -- Sidebar Navigation
 local Sidebar = Instance.new("Frame")
-Sidebar.Size = UDim2.new(0, 130, 1, -48)
+Sidebar.Size = UDim2.new(0, 140, 1, -48)
 Sidebar.Position = UDim2.new(0, 8, 0, 44)
 Sidebar.BackgroundColor3 = Theme.Sidebar
 Sidebar.BorderSizePixel = 0
@@ -378,8 +553,8 @@ SidePad.Parent = Sidebar
 
 -- Content Pages Container
 local Container = Instance.new("Frame")
-Container.Size = UDim2.new(1, -154, 1, -48)
-Container.Position = UDim2.new(0, 146, 0, 44)
+Container.Size = UDim2.new(1, -164, 1, -48)
+Container.Position = UDim2.new(0, 156, 0, 44)
 Container.BackgroundTransparency = 1
 Container.Parent = Main
 
@@ -444,8 +619,9 @@ local function createTab(id, title)
     return page
 end
 
-local PageFarm = createTab("Farm", "💰 Farm & Cash")
-local PageShop = createTab("Shop", "📦 Shop Automation")
+local PageFarm  = createTab("Farm", "💰 Farm & Cash")
+local PageShop  = createTab("Shop", "🛍️ Shop & Auction")
+local PageOpen  = createTab("Open", "⏳ Auto Place & Open")
 
 -- Card Builder
 local function makeCard(parent, title)
@@ -592,7 +768,7 @@ makeButton(CashAutoCard, "⚡ Force Collect Now", function()
 end)
 
 -- ========================================================================================
--- 📑 TAB 2: SHOP AUTOMATION (EGGS & BOXES)
+-- 📑 TAB 2: SHOP & AUCTION HOUSE
 -- ========================================================================================
 local EggCard = makeCard(PageShop, "Egg Shop (Skips Mythic Robux)")
 makeToggle(EggCard, "Auto Buy Eggs in Stock", Config.AutoBuyEggs, function(v)
@@ -622,8 +798,67 @@ BoxStockLabel.TextXAlignment = Enum.TextXAlignment.Left
 BoxStockLabel.Text = "Stock: Scanning..."
 BoxStockLabel.Parent = BoxCard
 
+local AuctionCard = makeCard(PageShop, "Auction House (1-Hour Direct Buy, No Bids)")
+makeToggle(AuctionCard, "Auto Buy Hourly Direct-Buy Items", Config.AutoBuyAuctionHouse, function(v)
+    Config.AutoBuyAuctionHouse = v
+    if v then buyAuctionHouseDirect() end
+end)
+makeButton(AuctionCard, "⚡ Buy Auction House Stock Now", function()
+    buyAuctionHouseDirect()
+end)
+
 -- ========================================================================================
--- 🔄 LIVE STATS UPDATER
+-- 📑 TAB 3: AUTO PLACE & OPEN (BOXES & EGGS)
+-- ========================================================================================
+local OpenMasterCard = makeCard(PageOpen, "Auto Place & Open System")
+makeToggle(OpenMasterCard, "Enable Auto Place & Open", Config.AutoPlaceAndOpen, function(v)
+    Config.AutoPlaceAndOpen = v
+end)
+makeToggle(OpenMasterCard, "Auto Skip Timers (If Available)", Config.AutoSkipTimers, function(v)
+    Config.AutoSkipTimers = v
+end)
+
+local PriorityCard = makeCard(PageOpen, "Placement Priority Order")
+local PriorityLabel = Instance.new("TextLabel")
+PriorityLabel.Size = UDim2.new(1, 0, 0, 18)
+PriorityLabel.BackgroundTransparency = 1
+PriorityLabel.Font = Enum.Font.GothamSemibold
+PriorityLabel.TextSize = 11
+PriorityLabel.TextColor3 = Theme.AccentSoft
+PriorityLabel.TextXAlignment = Enum.TextXAlignment.Left
+PriorityLabel.Text = "Current Priority: High Tier First"
+PriorityLabel.Parent = PriorityCard
+
+makeButton(PriorityCard, "⭐ Priority: High Tier First (Mythic > Rare)", function()
+    Config.OpenPriority = "HighTierFirst"
+    PriorityLabel.Text = "Current Priority: High Tier First"
+end)
+makeButton(PriorityCard, "🥚 Priority: Eggs First (All Eggs > Boxes)", function()
+    Config.OpenPriority = "EggsFirst"
+    PriorityLabel.Text = "Current Priority: Eggs First"
+end)
+makeButton(PriorityCard, "📦 Priority: Boxes First (All Boxes > Eggs)", function()
+    Config.OpenPriority = "BoxesFirst"
+    PriorityLabel.Text = "Current Priority: Boxes First"
+end)
+
+local PlacedStatusCard = makeCard(PageOpen, "Base Incubation Status")
+local PlacedStatusLabel = Instance.new("TextLabel")
+PlacedStatusLabel.Size = UDim2.new(1, 0, 0, 20)
+PlacedStatusLabel.BackgroundTransparency = 1
+PlacedStatusLabel.Font = Enum.Font.Gotham
+PlacedStatusLabel.TextSize = 10
+PlacedStatusLabel.TextColor3 = Theme.TextDim
+PlacedStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+PlacedStatusLabel.Text = "Placed Items: Scanning base..."
+PlacedStatusLabel.Parent = PlacedStatusCard
+
+makeButton(PlacedStatusCard, "⚡ Force Open Ready Items Now", function()
+    processPlacedItems()
+end)
+
+-- ========================================================================================
+-- 🔄 LIVE STATS UPDATER LOOP
 -- ========================================================================================
 task.spawn(function()
     while isRunning and _G.__SAKURA_LUCKYFISH == CURRENT_SESSION do
@@ -650,6 +885,21 @@ task.spawn(function()
                 table.insert(bTxt, string.format("#%d: %s (%s)", i, bItems[i] or "-", bSold[i] and "Sold" or "Ready"))
             end
             BoxStockLabel.Text = table.concat(bTxt, " | ")
+
+            -- Update Placed Items Status
+            local placedEggs = s.placedEggs or {}
+            local placedBoxes = s.placedLootboxes or {}
+            local pCount = 0
+            local pReady = 0
+            for _, d in pairs(placedEggs) do
+                pCount = pCount + 1
+                if (d.RemainingSeconds or 0) <= 0 then pReady = pReady + 1 end
+            end
+            for _, d in pairs(placedBoxes) do
+                pCount = pCount + 1
+                if (d.RemainingSeconds or 0) <= 0 then pReady = pReady + 1 end
+            end
+            PlacedStatusLabel.Text = string.format("Active Base Slots: %d Placed | %d Ready to Open", pCount, pReady)
         end)
         task.wait(1.4)
     end
@@ -661,4 +911,4 @@ TabBtns["Farm"].Button.BackgroundColor3 = Theme.CardSub
 TabBtns["Farm"].Button.TextColor3 = Theme.AccentSoft
 TabBtns["Farm"].Stroke.Transparency = 0
 
-print("🌸 [SAKURA] Clean Suite loaded successfully without Auto-Sell!")
+print("🌸 [SAKURA] Loaded with Auto Place/Open & Auction House Buy!")
