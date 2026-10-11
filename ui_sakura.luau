@@ -1,16 +1,14 @@
 --!nocheck
 --[[
   ========================================================================================
-  🌸 PULL A LUCKY FISH — SAKURA PREMIUM SUITE
+  🌸 PULL A LUCKY FISH — SAKURA CLEAN SUITE
   ========================================================================================
   Features:
     1. 💰 Auto-Collect Cash   - Ultra-clean base plot collection loop
     2. 🥚 Auto-Buy Eggs       - Buys all available in-game eggs (skips Robux Mythic Egg)
     3. 📦 Auto-Buy Boxes      - Buys Float Crates & Functional Objects Crates
-    4. 🐟 Fast Auto-Sell      - High-performance, stable selling with customizable
-                                filters for Mutations and Fish Rarities to keep
-    5. 🛑 Clean Teardown      - Closing the menu gracefully halts all background tasks
-    6. 🌸 Modern Fluent UI    - 100% English, sleek glassmorphism, responsive & smooth
+    4. 🛑 Clean Teardown      - Closing the menu gracefully halts all background tasks
+    5. 🌸 Modern Fluent UI    - 100% English, sleek glassmorphism, responsive & smooth
   ========================================================================================
 ]]
 
@@ -66,13 +64,6 @@ end
 local Remotes = require(Shared:WaitForChild("Remotes", 10))
 local CPD = require(Client:WaitForChild("ClientPlayerData", 10))
 
--- Load Fish Config for accurate rarity resolution
-local FishConfig = {}
-pcall(function()
-    local cfg = Shared:FindFirstChild("config") and Shared.config:FindFirstChild("FishConfig")
-    if cfg then FishConfig = require(cfg) end
-end)
-
 local function getState()
     if CPD and CPD.serverProfile and CPD.serverProfile.getState then
         local ok, s = pcall(function() return CPD.serverProfile:getState() end)
@@ -126,54 +117,13 @@ end
 -- 3. CONFIGURATION STATE
 -- ========================================================================================
 local Config = {
-    -- Auto Collect Cash
     AutoCollectCash = true,
-
-    -- Auto Buy Eggs
     AutoBuyEggs     = true,
-
-    -- Auto Buy Boxes
     AutoBuyBoxes    = true,
-
-    -- Auto Sell
-    AutoSell        = false,
-    KeepAllMutations = true,
-    KeepMutations   = {
-        ["Gold"]        = true,
-        ["Diamond"]     = true,
-        ["Shiny"]       = true,
-        ["Rainbow"]     = true,
-        ["Radioactive"] = true,
-        ["Molten"]      = true,
-        ["Frozen"]      = true,
-        ["Bloody"]      = true,
-        ["Cat"]         = true,
-        ["Enriched"]    = true,
-        ["Bubblegum"]   = true,
-        ["Pollinated"]  = true,
-    },
-    KeepRarities    = {
-        ["Common"]    = false,
-        ["Uncommon"]  = false,
-        ["Rare"]      = false,
-        ["Epic"]      = true,
-        ["Legendary"] = true,
-        ["Mythic"]    = true,
-        ["Devine"]    = true,
-        ["Godly"]     = true,
-        ["Celestial"] = true,
-        ["Hacked"]    = true,
-        ["Dino"]      = true,
-        ["SCP"]       = true,
-        ["Backroom"]  = true,
-        ["Secret"]    = true,
-        ["OG"]        = true,
-    },
-    KeepFishSpecies = {},
 }
 
 -- ========================================================================================
--- 4. AUTOMATION LOGIC (FAST, STABLE & SAFE)
+-- 4. AUTOMATION LOGIC
 -- ========================================================================================
 
 -- Cash Collection
@@ -248,71 +198,6 @@ local function buyBoxes()
     end
 end
 
--- Fast & Stable Auto-Sell
-local isSellingBusy = false
-local function runAutoSell()
-    if not Config.AutoSell or isSellingBusy then return end
-    isSellingBusy = true
-
-    local s = getState()
-    local inv = s.inventory or {}
-    local toSellKeys = {}
-
-    for key, item in pairs(inv) do
-        if type(item) == "table" and (item.Category == "Fish" or tostring(key):find("@")) then
-            local species, level, mutation = tostring(key):match("^(.-)@(%d+)@(.+)$")
-            if not species then
-                species, level = tostring(key):match("^(.-)@(%d+)$")
-            end
-            species = species or item.ConfigName or tostring(key)
-            mutation = mutation or (item.Mutations and item.Mutations[1]) or item.Mutation
-
-            local keep = false
-
-            -- 1. Check Mutation Whitelist
-            if mutation and mutation ~= "" then
-                if Config.KeepAllMutations or Config.KeepMutations[mutation] then
-                    keep = true
-                end
-            end
-
-            -- 2. Check Species Whitelist
-            if Config.KeepFishSpecies[species] then
-                keep = true
-            end
-
-            -- 3. Check Rarity Whitelist
-            local rarity = item.Rarity or (FishConfig[species] and FishConfig[species].Rarity) or "Common"
-            if Config.KeepRarities[rarity] then
-                keep = true
-            end
-
-            -- 4. Check Protected / Favorites
-            if s.favorites and s.favorites[key] then keep = true end
-            if s.lockedFish and s.lockedFish[key] then keep = true end
-
-            if not keep then
-                table.insert(toSellKeys, key)
-            end
-        end
-    end
-
-    if #toSellKeys > 0 then
-        -- Attempt batch sell first
-        local batchFired = fireRemote(Remotes.SellFishBatch, toSellKeys)
-        if not batchFired or #toSellKeys > 15 then
-            -- Rapid staggered fallback
-            for i = 1, math.min(#toSellKeys, 20) do
-                if not isRunning or not Config.AutoSell then break end
-                fireRemote(Remotes.SellFish, toSellKeys[i])
-                if i % 6 == 0 then task.wait(0.04) end
-            end
-        end
-    end
-
-    isSellingBusy = false
-end
-
 -- Main Background Worker
 task.spawn(function()
     while isRunning and _G.__SAKURA_LUCKYFISH == CURRENT_SESSION do
@@ -325,15 +210,12 @@ task.spawn(function()
         if Config.AutoBuyBoxes then
             pcall(buyBoxes)
         end
-        if Config.AutoSell then
-            pcall(runAutoSell)
-        end
-        task.wait(1.4)
+        task.wait(1.5)
     end
 end)
 
 -- ========================================================================================
--- 5. MODERN SAKURA UI (FULL ENGLISH, ULTRA SLEEK)
+-- 5. MODERN SAKURA UI (FULL ENGLISH, ULTRA SLEEK & COMPACT)
 -- ========================================================================================
 local Theme = {
     Background = Color3.fromRGB(19, 14, 20),
@@ -356,14 +238,14 @@ ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = targetParent
 
--- Handle Destroying connection for clean shutdown
+-- Clean shutdown handler on destruction
 table.insert(connections, ScreenGui.Destroying:Connect(cleanShutdown))
 
 -- Main Frame
 local Main = Instance.new("Frame")
 Main.Name = "SakuraMain"
-Main.Size = UDim2.new(0, 580, 0, 420)
-Main.Position = UDim2.new(0.5, -290, 0.5, -210)
+Main.Size = UDim2.new(0, 500, 0, 360)
+Main.Position = UDim2.new(0.5, -250, 0.5, -180)
 Main.BackgroundColor3 = Theme.Background
 Main.BorderSizePixel = 0
 Main.Active = true
@@ -474,7 +356,7 @@ end)
 
 -- Sidebar Navigation
 local Sidebar = Instance.new("Frame")
-Sidebar.Size = UDim2.new(0, 140, 1, -48)
+Sidebar.Size = UDim2.new(0, 130, 1, -48)
 Sidebar.Position = UDim2.new(0, 8, 0, 44)
 Sidebar.BackgroundColor3 = Theme.Sidebar
 Sidebar.BorderSizePixel = 0
@@ -496,8 +378,8 @@ SidePad.Parent = Sidebar
 
 -- Content Pages Container
 local Container = Instance.new("Frame")
-Container.Size = UDim2.new(1, -164, 1, -48)
-Container.Position = UDim2.new(0, 156, 0, 44)
+Container.Size = UDim2.new(1, -154, 1, -48)
+Container.Position = UDim2.new(0, 146, 0, 44)
 Container.BackgroundTransparency = 1
 Container.Parent = Main
 
@@ -562,9 +444,8 @@ local function createTab(id, title)
     return page
 end
 
-local PageFarm  = createTab("Farm", "💰 Farm & Cash")
-local PageEggs  = createTab("Eggs", "🥚 Eggs & Boxes")
-local PageSell  = createTab("Sell", "🐟 Auto-Sell")
+local PageFarm = createTab("Farm", "💰 Farm & Cash")
+local PageShop = createTab("Shop", "📦 Shop Automation")
 
 -- Card Builder
 local function makeCard(parent, title)
@@ -711,9 +592,9 @@ makeButton(CashAutoCard, "⚡ Force Collect Now", function()
 end)
 
 -- ========================================================================================
--- 📑 TAB 2: EGGS & BOXES
+-- 📑 TAB 2: SHOP AUTOMATION (EGGS & BOXES)
 -- ========================================================================================
-local EggCard = makeCard(PageEggs, "Egg Shop (Skips Mythic Robux)")
+local EggCard = makeCard(PageShop, "Egg Shop (Skips Mythic Robux)")
 makeToggle(EggCard, "Auto Buy Eggs in Stock", Config.AutoBuyEggs, function(v)
     Config.AutoBuyEggs = v
 end)
@@ -727,7 +608,7 @@ EggStockLabel.TextXAlignment = Enum.TextXAlignment.Left
 EggStockLabel.Text = "Stock: Scanning..."
 EggStockLabel.Parent = EggCard
 
-local BoxCard = makeCard(PageEggs, "Box Shop (Floats & Functional Crates)")
+local BoxCard = makeCard(PageShop, "Box Shop (Floats & Functional Crates)")
 makeToggle(BoxCard, "Auto Buy Boxes & Functional Crates", Config.AutoBuyBoxes, function(v)
     Config.AutoBuyBoxes = v
 end)
@@ -740,41 +621,6 @@ BoxStockLabel.TextColor3 = Theme.TextDim
 BoxStockLabel.TextXAlignment = Enum.TextXAlignment.Left
 BoxStockLabel.Text = "Stock: Scanning..."
 BoxStockLabel.Parent = BoxCard
-
--- ========================================================================================
--- 📑 TAB 3: FAST AUTO-SELL & SMART FILTERS
--- ========================================================================================
-local SellMasterCard = makeCard(PageSell, "Auto-Sell Master")
-makeToggle(SellMasterCard, "Enable High-Speed Auto-Sell", Config.AutoSell, function(v)
-    Config.AutoSell = v
-end)
-makeToggle(SellMasterCard, "Keep ALL Mutated Fish (Safety Master)", Config.KeepAllMutations, function(v)
-    Config.KeepAllMutations = v
-end)
-makeButton(SellMasterCard, "⚡ Trigger Sell Pass Now", function()
-    runAutoSell()
-end)
-
-local MutFilterCard = makeCard(PageSell, "Mutations to Keep (Whitelist)")
-local mutationList = {
-    "Shiny", "Rainbow", "Radioactive", "Diamond", "Gold",
-    "Molten", "Frozen", "Bloody", "Cat", "Enriched"
-}
-for _, mut in ipairs(mutationList) do
-    makeToggle(MutFilterCard, "Keep " .. mut .. " Mutation", Config.KeepMutations[mut] or false, function(v)
-        Config.KeepMutations[mut] = v
-    end)
-end
-
-local RarityFilterCard = makeCard(PageSell, "Fish Rarities to Keep (Whitelist)")
-local rarityList = {
-    "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Devine", "Godly", "Secret"
-}
-for _, rar in ipairs(rarityList) do
-    makeToggle(RarityFilterCard, "Keep " .. rar .. " Fish", Config.KeepRarities[rar] or false, function(v)
-        Config.KeepRarities[rar] = v
-    end)
-end
 
 -- ========================================================================================
 -- 🔄 LIVE STATS UPDATER
@@ -815,4 +661,4 @@ TabBtns["Farm"].Button.BackgroundColor3 = Theme.CardSub
 TabBtns["Farm"].Button.TextColor3 = Theme.AccentSoft
 TabBtns["Farm"].Stroke.Transparency = 0
 
-print("🌸 [SAKURA] Premium Suite loaded with full teardown & Auto-Sell!")
+print("🌸 [SAKURA] Clean Suite loaded successfully without Auto-Sell!")
