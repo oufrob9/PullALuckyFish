@@ -8,8 +8,8 @@
     2. 🥚 Auto-Buy Eggs          - Buys all in-game eggs in stock (skips Robux Mythic Egg)
     3. 📦 Auto-Buy Boxes         - Buys Float Crates & Functional Objects Crates
     4. 🏷️ Auto-Buy Auction House - Buys hourly restock direct-buy items (no bids!)
-    5. ⏳ Auto Place & Open      - Places eggs & boxes on base by priority, waits for
-                                   timer, and automatically opens/hatches them
+    5. ⏳ Auto Place & Open      - STRICT slot limit check before placing (verifies free space)
+                                   STRICT timer completion check before opening (timer must be 0)
     6. 🛑 Clean Teardown         - Gracefully terminates all background tasks upon closing
     7. 🌸 Sleek Modern UI        - Full English, glassmorphism, responsive & minimizable
   ========================================================================================
@@ -129,13 +129,148 @@ local Config = {
     AutoBuyAuctionHouse = false,
 
     -- Auto Open & Hatch
-    AutoPlaceAndOpen    = true,
-    AutoSkipTimers      = true,
+    AutoPlace           = true,  -- Places items when space is available
+    AutoOpen            = true,  -- Opens items ONLY when timer has finished
+    AutoSkipTimers      = true,  -- Attempts timer skip if available
     OpenPriority        = "HighTierFirst", -- "HighTierFirst", "EggsFirst", "BoxesFirst"
 }
 
 -- ========================================================================================
--- 4. AUTOMATION LOGIC (FAST, STABLE & RESILIENT)
+-- 4. TIMER & PLACEMENT CAPACITY VERIFICATION HELPERS
+-- ========================================================================================
+
+-- Maximum incubation slots on base
+local function getMaxPlacementLimit()
+    local limit = 3
+    pcall(function()
+        local PLC = Shared:FindFirstChild("config") and Shared.config:FindFirstChild("PlacementLimitConfig")
+        local mod = PLC and require(PLC)
+        if mod and mod.GetLimit then
+            local s = getState()
+            limit = mod.GetLimit(s.placementLimitLevel or 0)
+        elseif mod and mod.BaseLimit then
+            limit = mod.BaseLimit + (getState().placementLimitLevel or 0)
+        end
+    end)
+    return limit or 3
+end
+
+-- Count how many items are currently placed on the base
+local function getPlacedItemCount()
+    local s = getState()
+    local placedEggs = s.placedEggs or {}
+    local placedBoxes = s.placedLootboxes or {}
+    local count = 0
+    for _ in pairs(placedEggs) do count = count + 1 end
+    for _ in pairs(placedBoxes) do count = count + 1 end
+
+    -- Check visual BillboardGuis as well to avoid desync
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if pg then
+            local guiCount = 0
+            for _, g in ipairs(pg:GetChildren()) do
+                if g:IsA("BillboardGui") and (g.Name:find("LootboxTimer_") or g.Name:find("EggTimer_")) then
+                    guiCount = guiCount + 1
+                end
+            end
+            if guiCount > count then count = guiCount end
+        end
+    end)
+
+    return count
+end
+
+-- Check if there is free space before placing
+local function hasSpaceToPlace()
+    local currentCount = getPlacedItemCount()
+    local maxLimit = getMaxPlacementLimit()
+    return currentCount < maxLimit, currentCount, maxLimit
+end
+
+-- Parse textual countdown from visual labels
+local function parseTimerText(text)
+    if not text or text == "" then return nil end
+    local low = string.lower(text)
+
+    -- Explicit ready / open strings
+    if low:find("open") or low:find("ready") or low:find("claim") or low:find("hatch") or low == "0:00" or low == "00:00" or low == "0s" then
+        return 0 -- Timer is 100% finished
+    end
+
+    -- Format mm:ss or hh:mm:ss
+    local m, s = low:match("(%d+):(%d+)")
+    if m and s then
+        return tonumber(m) * 60 + tonumber(s)
+    end
+
+    -- Format Xs or Xm
+    local sec = low:match("(%d+)%s*s")
+    if sec then return tonumber(sec) end
+    local min = low:match("(%d+)%s*m")
+    if min then return tonumber(min) * 60 end
+
+    return nil
+end
+
+-- Strict check: Is the egg/lootbox timer 100% finished?
+local function isTimerFinished(id, data, category)
+    -- 1. Check visual GUI in PlayerGui for real-time certainty
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if pg then
+        local guiName = (category == "Egg" and "EggTimer_" or "LootboxTimer_") .. tostring(id)
+        local timerGui = pg:FindFirstChild(guiName) or pg:FindFirstChild("Timer_" .. tostring(id))
+        if timerGui then
+            for _, desc in ipairs(timerGui:GetDescendants()) do
+                if desc:IsA("TextLabel") and desc.Visible then
+                    local remSec = parseTimerText(desc.Text)
+                    if remSec ~= nil then
+                        if remSec > 0 then
+                            return false -- Timer STILL RUNNING! Do NOT open.
+                        else
+                            return true  -- Label explicitly says Ready/Open/0:00!
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2. Check state data
+    if type(data) == "table" then
+        -- Explicit ready flag
+        if data.Ready == true or data.ready == true or data.isReady == true then
+            return true
+        end
+
+        -- Remaining seconds in state
+        local rem = data.RemainingSeconds or data.remainingSeconds or data.remaining or data.Timer or data.timer
+        if rem ~= nil and tonumber(rem) then
+            if tonumber(rem) > 0 then
+                return false -- Timer STILL RUNNING in state! Do NOT open.
+            else
+                return true  -- State says 0 or negative
+            end
+        end
+
+        -- Timestamp comparison
+        local now = workspace:GetServerTimeNow() or os.time()
+        local endT = data.endTime or data.EndTime or data.readyAt or data.finishTime
+        if endT and tonumber(endT) then
+            if tonumber(endT) > now then
+                return false -- End time is in the future! Do NOT open.
+            else
+                return true  -- End time has passed!
+            end
+        end
+    end
+
+    -- Safety default: If we cannot verify timer is 0, do NOT open yet
+    return false
+end
+
+-- ========================================================================================
+-- 5. AUTOMATION ACTIONS
 -- ========================================================================================
 
 -- Cash Collection
@@ -208,12 +343,11 @@ local function buyBoxes()
     end
 end
 
--- Auto Buy Auction House Direct-Buy Items (Every 1 Hour Restock, NO BIDS)
+-- Auto Buy Auction House Direct-Buy Items (Hourly Restock, NO BIDS)
 local function buyAuctionHouseDirect()
     if not Config.AutoBuyAuctionHouse then return end
     fireRemote(Remotes.GetAuctionHouseState)
 
-    -- Classic & Limited fixed buy slots (slots 1 to 6)
     for slotIdx = 1, 6 do
         if not isRunning or not Config.AutoBuyAuctionHouse then break end
         fireRemote(Remotes.AuctionBuy, slotIdx)
@@ -223,10 +357,40 @@ local function buyAuctionHouseDirect()
     end
 end
 
--- ----------------------------------------------------------------------------------------
--- 5. AUTO PLACE & OPEN (BOXES & EGGS BY PRIORITY)
--- ----------------------------------------------------------------------------------------
+-- Open/Hatch Ready Items ONLY when timer is finished
+local function processOpenReadyItems()
+    if not Config.AutoOpen then return end
+    local s = getState()
 
+    -- 1. Check Placed Eggs
+    local placedEggs = s.placedEggs or {}
+    for eggId, data in pairs(placedEggs) do
+        if isTimerFinished(eggId, data, "Egg") then
+            -- Timer is 100% finished: Safe to hatch!
+            fireRemote(Remotes.HatchEgg, eggId)
+            fireRemote(Remotes.HatchEgg, tostring(eggId))
+            task.wait(0.2)
+        elseif Config.AutoSkipTimers then
+            fireRemote(Remotes.SkipEggTimer, eggId)
+        end
+    end
+
+    -- 2. Check Placed Lootboxes
+    local placedBoxes = s.placedLootboxes or {}
+    for boxId, data in pairs(placedBoxes) do
+        if isTimerFinished(boxId, data, "Box") then
+            -- Timer is 100% finished: Safe to open!
+            fireRemote(Remotes.OpenFloatLootbox, boxId)
+            fireRemote(Remotes.OpenFloatLootbox, tostring(boxId))
+            fireRemote(Remotes.ClaimFloatLootboxReward, boxId)
+            task.wait(0.2)
+        elseif Config.AutoSkipTimers then
+            fireRemote(Remotes.SkipFloatLootboxTimer, boxId)
+        end
+    end
+end
+
+-- Place Items ONLY if there is free space on base
 local RarityScore = {
     ["MythicFloatCrate"]     = 100,
     ["OceanEgg"]             = 90,
@@ -240,73 +404,19 @@ local RarityScore = {
     ["CatFloatCrate"]        = 20,
 }
 
--- Check and Open/Hatch Ready Items on Base
-local function processPlacedItems()
-    local s = getState()
+local lastPlaceTime = 0
+local function processPlaceItemsIfSpace()
+    if not Config.AutoPlace then return end
+    if os.clock() - lastPlaceTime < 1.0 then return end -- Cooldown between placements
 
-    -- 1. Process Placed Eggs
-    local placedEggs = s.placedEggs or {}
-    for eggId, data in pairs(placedEggs) do
-        local remaining = (type(data) == "table" and (data.RemainingSeconds or data.Timer)) or 0
-        if remaining <= 0 or (type(data) == "table" and data.Ready) then
-            fireRemote(Remotes.HatchEgg, eggId)
-            fireRemote(Remotes.HatchEgg, tostring(eggId))
-        elseif Config.AutoSkipTimers then
-            fireRemote(Remotes.SkipEggTimer, eggId)
-        end
+    -- STRICT CHECK: Is there free space available?
+    local hasSpace, currentCount, maxLimit = hasSpaceToPlace()
+    if not hasSpace then
+        return -- BASE IS FULL! Do NOT place anything.
     end
 
-    -- 2. Process Placed Lootboxes
-    local placedBoxes = s.placedLootboxes or {}
-    for boxId, data in pairs(placedBoxes) do
-        local remaining = (type(data) == "table" and (data.RemainingSeconds or data.Timer)) or 0
-        if remaining <= 0 or (type(data) == "table" and data.Ready) then
-            fireRemote(Remotes.OpenFloatLootbox, boxId)
-            fireRemote(Remotes.OpenFloatLootbox, tostring(boxId))
-            fireRemote(Remotes.ClaimFloatLootboxReward, boxId)
-        elseif Config.AutoSkipTimers then
-            fireRemote(Remotes.SkipFloatLootboxTimer, boxId)
-        end
-    end
-
-    -- Check BillboardGui timers in PlayerGui for instant responsiveness
-    pcall(function()
-        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        if pg then
-            for _, gui in ipairs(pg:GetChildren()) do
-                if gui:IsA("BillboardGui") and gui.Name:find("LootboxTimer_") then
-                    local id = gui.Name:gsub("LootboxTimer_", "")
-                    local isReady = false
-                    for _, lbl in ipairs(gui:GetDescendants()) do
-                        if lbl:IsA("TextLabel") and (lbl.Text == "Open" or lbl.Text == "Ready" or lbl.Text:find("0:00")) then
-                            isReady = true
-                            break
-                        end
-                    end
-                    if isReady then
-                        fireRemote(Remotes.OpenFloatLootbox, id)
-                        fireRemote(Remotes.ClaimFloatLootboxReward, id)
-                    end
-                end
-            end
-        end
-    end)
-end
-
--- Place Candidate Items from Inventory onto Base
-local function placeNextCandidate()
+    -- Select candidates from inventory
     local s = getState()
-    local placedEggs = s.placedEggs or {}
-    local placedBoxes = s.placedLootboxes or {}
-
-    local totalPlaced = 0
-    for _ in pairs(placedEggs) do totalPlaced = totalPlaced + 1 end
-    for _ in pairs(placedBoxes) do totalPlaced = totalPlaced + 1 end
-
-    local maxLimit = s.placementLimitLevel or 3
-    if totalPlaced >= maxLimit then return end -- Base incubation slots full
-
-    -- Collect all placeable candidates from inventory
     local inv = s.inventory or {}
     local candidates = {}
 
@@ -329,7 +439,7 @@ local function placeNextCandidate()
 
     if #candidates == 0 then return end
 
-    -- Sort candidates by chosen Priority Order
+    -- Sort candidates by selected Priority
     if Config.OpenPriority == "HighTierFirst" then
         table.sort(candidates, function(a, b) return a.Score > b.Score end)
     elseif Config.OpenPriority == "EggsFirst" then
@@ -344,8 +454,10 @@ local function placeNextCandidate()
         end)
     end
 
-    -- Place best candidate
+    -- Place only 1 item to preserve free slot accounting
     local chosen = candidates[1]
+    lastPlaceTime = os.clock()
+
     if chosen.Type == "Egg" then
         fireRemote(Remotes.PlaceEgg, chosen.Name)
         fireRemote(Remotes.PlaceEgg, { ConfigName = chosen.Name })
@@ -371,10 +483,12 @@ task.spawn(function()
         if Config.AutoBuyBoxes then
             pcall(buyBoxes)
         end
-        if Config.AutoPlaceAndOpen then
-            pcall(processPlacedItems)
-            pcall(placeNextCandidate)
-        end
+
+        -- Step 1: Open items where timer is 100% finished
+        pcall(processOpenReadyItems)
+
+        -- Step 2: Place new item ONLY if space is available
+        pcall(processPlaceItemsIfSpace)
 
         -- Check Auction House direct buy every 15 seconds
         auctionTimer = auctionTimer + 1.5
@@ -419,8 +533,8 @@ table.insert(connections, ScreenGui.Destroying:Connect(cleanShutdown))
 -- Main Frame
 local Main = Instance.new("Frame")
 Main.Name = "SakuraMain"
-Main.Size = UDim2.new(0, 560, 0, 410)
-Main.Position = UDim2.new(0.5, -280, 0.5, -205)
+Main.Size = UDim2.new(0, 560, 0, 420)
+Main.Position = UDim2.new(0.5, -280, 0.5, -210)
 Main.BackgroundColor3 = Theme.Background
 Main.BorderSizePixel = 0
 Main.Active = true
@@ -504,7 +618,7 @@ local MinCorner = Instance.new("UICorner")
 MinCorner.CornerRadius = UDim.new(0, 6)
 MinCorner.Parent = MinBtn
 
--- Floating Sakura Blossom Button (When Minimized)
+-- Floating Sakura Button
 local FloatBtn = Instance.new("TextButton")
 FloatBtn.Size = UDim2.new(0, 42, 0, 42)
 FloatBtn.Position = UDim2.new(0, 15, 0.5, -21)
@@ -808,14 +922,42 @@ makeButton(AuctionCard, "⚡ Buy Auction House Stock Now", function()
 end)
 
 -- ========================================================================================
--- 📑 TAB 3: AUTO PLACE & OPEN (BOXES & EGGS)
+-- 📑 TAB 3: AUTO PLACE & OPEN (WITH STRICT CHECKS)
 -- ========================================================================================
-local OpenMasterCard = makeCard(PageOpen, "Auto Place & Open System")
-makeToggle(OpenMasterCard, "Enable Auto Place & Open", Config.AutoPlaceAndOpen, function(v)
-    Config.AutoPlaceAndOpen = v
+local OpenMasterCard = makeCard(PageOpen, "Automation Controls")
+makeToggle(OpenMasterCard, "Auto Place (Checks Space First)", Config.AutoPlace, function(v)
+    Config.AutoPlace = v
+end)
+makeToggle(OpenMasterCard, "Auto Open/Hatch (Checks Timer Finished)", Config.AutoOpen, function(v)
+    Config.AutoOpen = v
 end)
 makeToggle(OpenMasterCard, "Auto Skip Timers (If Available)", Config.AutoSkipTimers, function(v)
     Config.AutoSkipTimers = v
+end)
+
+local SpaceStatusCard = makeCard(PageOpen, "Base Incubation Capacity & Timers")
+local SlotStatusLabel = Instance.new("TextLabel")
+SlotStatusLabel.Size = UDim2.new(1, 0, 0, 18)
+SlotStatusLabel.BackgroundTransparency = 1
+SlotStatusLabel.Font = Enum.Font.GothamBold
+SlotStatusLabel.TextSize = 11
+SlotStatusLabel.TextColor3 = Theme.Green
+SlotStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+SlotStatusLabel.Text = "Slots: Checking base capacity..."
+SlotStatusLabel.Parent = SpaceStatusCard
+
+local TimerStatusLabel = Instance.new("TextLabel")
+TimerStatusLabel.Size = UDim2.new(1, 0, 0, 16)
+TimerStatusLabel.BackgroundTransparency = 1
+TimerStatusLabel.Font = Enum.Font.Gotham
+TimerStatusLabel.TextSize = 10
+TimerStatusLabel.TextColor3 = Theme.TextDim
+TimerStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+TimerStatusLabel.Text = "Timers: Monitoring placed items..."
+TimerStatusLabel.Parent = SpaceStatusCard
+
+makeButton(SpaceStatusCard, "⚡ Force Open Ready Items Now (Timer = 0s only)", function()
+    processOpenReadyItems()
 end)
 
 local PriorityCard = makeCard(PageOpen, "Placement Priority Order")
@@ -840,21 +982,6 @@ end)
 makeButton(PriorityCard, "📦 Priority: Boxes First (All Boxes > Eggs)", function()
     Config.OpenPriority = "BoxesFirst"
     PriorityLabel.Text = "Current Priority: Boxes First"
-end)
-
-local PlacedStatusCard = makeCard(PageOpen, "Base Incubation Status")
-local PlacedStatusLabel = Instance.new("TextLabel")
-PlacedStatusLabel.Size = UDim2.new(1, 0, 0, 20)
-PlacedStatusLabel.BackgroundTransparency = 1
-PlacedStatusLabel.Font = Enum.Font.Gotham
-PlacedStatusLabel.TextSize = 10
-PlacedStatusLabel.TextColor3 = Theme.TextDim
-PlacedStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-PlacedStatusLabel.Text = "Placed Items: Scanning base..."
-PlacedStatusLabel.Parent = PlacedStatusCard
-
-makeButton(PlacedStatusCard, "⚡ Force Open Ready Items Now", function()
-    processPlacedItems()
 end)
 
 -- ========================================================================================
@@ -886,20 +1013,29 @@ task.spawn(function()
             end
             BoxStockLabel.Text = table.concat(bTxt, " | ")
 
-            -- Update Placed Items Status
+            -- Update Space & Timer Verification Status
+            local hasSpace, currentCount, maxLimit = hasSpaceToPlace()
+            if hasSpace then
+                SlotStatusLabel.Text = string.format("Slots: %d / %d Used  ✔ (%d Free Space)", currentCount, maxLimit, maxLimit - currentCount)
+                SlotStatusLabel.TextColor3 = Theme.Green
+            else
+                SlotStatusLabel.Text = string.format("Slots: %d / %d Full  ⛔ (No Free Space)", currentCount, maxLimit)
+                SlotStatusLabel.TextColor3 = Theme.Red
+            end
+
             local placedEggs = s.placedEggs or {}
             local placedBoxes = s.placedLootboxes or {}
-            local pCount = 0
-            local pReady = 0
-            for _, d in pairs(placedEggs) do
-                pCount = pCount + 1
-                if (d.RemainingSeconds or 0) <= 0 then pReady = pReady + 1 end
+            local readyCount = 0
+            local runningCount = 0
+
+            for id, d in pairs(placedEggs) do
+                if isTimerFinished(id, d, "Egg") then readyCount = readyCount + 1 else runningCount = runningCount + 1 end
             end
-            for _, d in pairs(placedBoxes) do
-                pCount = pCount + 1
-                if (d.RemainingSeconds or 0) <= 0 then pReady = pReady + 1 end
+            for id, d in pairs(placedBoxes) do
+                if isTimerFinished(id, d, "Box") then readyCount = readyCount + 1 else runningCount = runningCount + 1 end
             end
-            PlacedStatusLabel.Text = string.format("Active Base Slots: %d Placed | %d Ready to Open", pCount, pReady)
+
+            TimerStatusLabel.Text = string.format("Timers: %d Still Ticking  |  %d Finished & Ready to Open", runningCount, readyCount)
         end)
         task.wait(1.4)
     end
@@ -911,4 +1047,4 @@ TabBtns["Farm"].Button.BackgroundColor3 = Theme.CardSub
 TabBtns["Farm"].Button.TextColor3 = Theme.AccentSoft
 TabBtns["Farm"].Stroke.Transparency = 0
 
-print("🌸 [SAKURA] Loaded with Auto Place/Open & Auction House Buy!")
+print("🌸 [SAKURA] Loaded with strict capacity and timer verification!")
