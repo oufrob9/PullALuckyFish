@@ -188,6 +188,84 @@ local function hasSpaceToPlace()
     return currentCount < maxLimit, currentCount, maxLimit
 end
 
+-- Locate player's base in Workspace
+local function findPlayerBase()
+    -- 1. Try PlayerBaseIndicator adornee in PlayerGui
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if pg then
+        local pbi = pg:FindFirstChild("PlayerBaseIndicator", true)
+        if pbi and pbi:IsA("BillboardGui") and pbi.Adornee then
+            local ad = pbi.Adornee
+            return ad:IsA("Model") and ad or ad.Parent
+        end
+    end
+
+    -- 2. Try direct Workspace matching
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if obj:IsA("Model") or obj:IsA("Folder") then
+            if obj.Name:find(LocalPlayer.Name) or obj.Name:find(tostring(LocalPlayer.UserId)) then
+                return obj
+            end
+            local owner = obj:FindFirstChild("Owner") or obj:FindFirstChild("Player")
+            if owner and (owner.Value == LocalPlayer or owner.Value == LocalPlayer.Name or tostring(owner.Value) == tostring(LocalPlayer.UserId)) then
+                return obj
+            end
+        end
+    end
+
+    return nil
+end
+
+-- Locate AuctionHousePart in Workspace
+local function getAuctionHousePart()
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if pg then
+        local dot = pg:FindFirstChild("IndicatorDotBgui_AuctionHousePart", true)
+        if dot and dot:IsA("BillboardGui") and dot.Adornee then
+            return dot.Adornee
+        end
+    end
+
+    local part = workspace:FindFirstChild("AuctionHousePart", true)
+    if part and part:IsA("BasePart") then return part end
+
+    local CollectionService = game:GetService("CollectionService")
+    local tagged = CollectionService:GetTagged("AuctionHouse")
+    if tagged and #tagged > 0 then
+        local first = tagged[1]
+        if first:IsA("BasePart") then return first end
+        return first:FindFirstChildWhichIsA("BasePart")
+    end
+
+    return nil
+end
+
+-- Find next free slot index on base
+local function getFreeBaseSlot()
+    local s = getState()
+    local occupied = {}
+    for id, d in pairs(s.placedEggs or {}) do
+        if type(d) == "table" then
+            local sl = d.Slot or d.slot or d.Index or d.index or d.Stand or d.stand
+            if sl and tonumber(sl) then occupied[tonumber(sl)] = true end
+        end
+    end
+    for id, d in pairs(s.placedLootboxes or {}) do
+        if type(d) == "table" then
+            local sl = d.Slot or d.slot or d.Index or d.index or d.Stand or d.stand
+            if sl and tonumber(sl) then occupied[tonumber(sl)] = true end
+        end
+    end
+
+    local maxLimit = getMaxPlacementLimit()
+    for i = 1, maxLimit do
+        if not occupied[i] then
+            return i
+        end
+    end
+    return 1
+end
+
 -- Parse textual countdown from visual labels
 local function parseTimerText(text)
     if not text or text == "" then return nil end
@@ -236,7 +314,22 @@ local function isTimerFinished(id, data, category)
         end
     end
 
-    -- 2. Check state data
+    -- 2. Check placed model ProximityPrompt in Workspace (if ready to open, prompt is Enabled)
+    local base = findPlayerBase()
+    if base then
+        for _, desc in ipairs(base:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") and desc.Enabled then
+                local act = tostring(desc.ActionText):lower()
+                if act:find("open") or act:find("hatch") or act:find("claim") then
+                    if tostring(desc.Parent):find(tostring(id)) or (desc:FindFirstAncestorWhichIsA("Model") and desc:FindFirstAncestorWhichIsA("Model").Name:find(tostring(id))) then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. Check state data
     if type(data) == "table" then
         -- Explicit ready flag
         if data.Ready == true or data.ready == true or data.isReady == true then
@@ -343,18 +436,77 @@ local function buyBoxes()
     end
 end
 
+local isAuctionBusy = false
+local lastAuctionCheck = 0
+
 -- Auto Buy Auction House Direct-Buy Items (Hourly Restock, NO BIDS)
 local function buyAuctionHouseDirect()
-    if not Config.AutoBuyAuctionHouse then return end
-    fireRemote(Remotes.GetAuctionHouseState)
+    if not Config.AutoBuyAuctionHouse or isAuctionBusy then return end
+    isAuctionBusy = true
+    lastAuctionCheck = os.clock()
 
-    for slotIdx = 1, 6 do
-        if not isRunning or not Config.AutoBuyAuctionHouse then break end
-        fireRemote(Remotes.AuctionBuy, slotIdx)
-        fireRemote(Remotes.AuctionBuy, tostring(slotIdx))
-        fireRemote(Remotes.AuctionBuy, { Slot = slotIdx })
-        task.wait(0.15)
-    end
+    pcall(function()
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        local auctionPart = getAuctionHousePart()
+        local savedCFrame = nil
+
+        -- 1. Ensure Player is within Proximity (MaxDistance = 10 studs check on server)
+        if auctionPart and hrp then
+            local dist = (hrp.Position - auctionPart.Position).Magnitude
+            if dist > 12 then
+                savedCFrame = hrp.CFrame
+                hrp.CFrame = auctionPart.CFrame + Vector3.new(0, 3, 0)
+                task.wait(0.35) -- allow server replication
+            end
+
+            -- 2. Trigger ProximityPrompt on AuctionHousePart if present to register interaction
+            if fireproximityprompt then
+                for _, desc in ipairs(auctionPart:GetDescendants()) do
+                    if desc:IsA("ProximityPrompt") and desc.Enabled then
+                        pcall(function() fireproximityprompt(desc) end)
+                        task.wait(0.15)
+                    end
+                end
+            end
+        end
+
+        -- 3. Query current state from server
+        if Remotes.GetAuctionHouseState and Remotes.GetAuctionHouseState.Call then
+            pcall(function() Remotes.GetAuctionHouseState:Call():Await() end)
+            task.wait(0.2)
+        end
+
+        -- 4. Buy Direct-Buy Slots:
+        -- Slots 1..4: Classic rotation pool (4 slots)
+        -- Slots 5..6: Limited rotation pool (2 slots)
+        for slotIdx = 1, 6 do
+            if not isRunning or not Config.AutoBuyAuctionHouse then break end
+
+            if Remotes.AuctionBuy then
+                if Remotes.AuctionBuy.Call then
+                    pcall(function() Remotes.AuctionBuy:Call(slotIdx):Await() end)
+                    pcall(function() Remotes.AuctionBuy:Call(tostring(slotIdx)):Await() end)
+                    pcall(function() Remotes.AuctionBuy:Call({ Slot = slotIdx }):Await() end)
+                end
+                if Remotes.AuctionBuy.Fire then
+                    pcall(function() Remotes.AuctionBuy:Fire(slotIdx) end)
+                    pcall(function() Remotes.AuctionBuy:Fire(tostring(slotIdx)) end)
+                    pcall(function() Remotes.AuctionBuy:Fire({ Slot = slotIdx }) end)
+                end
+            end
+            print(string.format("[SAKURA] Auction direct buy attempted for slot #%d", slotIdx))
+            task.wait(0.8) -- strictly respect ActionCooldown = 0.75s!
+        end
+
+        -- 5. Return Player safely to original position
+        if savedCFrame and hrp and hrp.Parent then
+            hrp.CFrame = savedCFrame
+            task.wait(0.2)
+        end
+    end)
+
+    isAuctionBusy = false
 end
 
 -- Open/Hatch Ready Items ONLY when timer is finished
@@ -367,8 +519,16 @@ local function processOpenReadyItems()
     for eggId, data in pairs(placedEggs) do
         if isTimerFinished(eggId, data, "Egg") then
             -- Timer is 100% finished: Safe to hatch!
-            fireRemote(Remotes.HatchEgg, eggId)
-            fireRemote(Remotes.HatchEgg, tostring(eggId))
+            if Remotes.HatchEgg then
+                if Remotes.HatchEgg.Call then
+                    pcall(function() Remotes.HatchEgg:Call(eggId):Await() end)
+                    pcall(function() Remotes.HatchEgg:Call(tostring(eggId)):Await() end)
+                end
+                if Remotes.HatchEgg.Fire then
+                    pcall(function() Remotes.HatchEgg:Fire(eggId) end)
+                    pcall(function() Remotes.HatchEgg:Fire(tostring(eggId)) end)
+                end
+            end
             task.wait(0.2)
         elseif Config.AutoSkipTimers then
             fireRemote(Remotes.SkipEggTimer, eggId)
@@ -380,12 +540,33 @@ local function processOpenReadyItems()
     for boxId, data in pairs(placedBoxes) do
         if isTimerFinished(boxId, data, "Box") then
             -- Timer is 100% finished: Safe to open!
-            fireRemote(Remotes.OpenFloatLootbox, boxId)
-            fireRemote(Remotes.OpenFloatLootbox, tostring(boxId))
+            if Remotes.OpenFloatLootbox then
+                if Remotes.OpenFloatLootbox.Call then
+                    pcall(function() Remotes.OpenFloatLootbox:Call(boxId):Await() end)
+                    pcall(function() Remotes.OpenFloatLootbox:Call(tostring(boxId)):Await() end)
+                end
+                if Remotes.OpenFloatLootbox.Fire then
+                    pcall(function() Remotes.OpenFloatLootbox:Fire(boxId) end)
+                    pcall(function() Remotes.OpenFloatLootbox:Fire(tostring(boxId)) end)
+                end
+            end
             fireRemote(Remotes.ClaimFloatLootboxReward, boxId)
             task.wait(0.2)
         elseif Config.AutoSkipTimers then
             fireRemote(Remotes.SkipFloatLootboxTimer, boxId)
+        end
+    end
+
+    -- 3. Check any base ProximityPrompt ready to Open/Hatch
+    local base = findPlayerBase()
+    if base and fireproximityprompt then
+        for _, desc in ipairs(base:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") and desc.Enabled then
+                local act = tostring(desc.ActionText):lower()
+                if act:find("open") or act:find("hatch") or act:find("claim") then
+                    pcall(function() fireproximityprompt(desc) end)
+                end
+            end
         end
     end
 end
@@ -407,13 +588,15 @@ local RarityScore = {
 local lastPlaceTime = 0
 local function processPlaceItemsIfSpace()
     if not Config.AutoPlace then return end
-    if os.clock() - lastPlaceTime < 1.0 then return end -- Cooldown between placements
+    if os.clock() - lastPlaceTime < 1.2 then return end -- Cooldown between placements
 
     -- STRICT CHECK: Is there free space available?
     local hasSpace, currentCount, maxLimit = hasSpaceToPlace()
     if not hasSpace then
         return -- BASE IS FULL! Do NOT place anything.
     end
+
+    local freeSlot = getFreeBaseSlot()
 
     -- Select candidates from inventory
     local s = getState()
@@ -454,17 +637,74 @@ local function processPlaceItemsIfSpace()
         end)
     end
 
-    -- Place only 1 item to preserve free slot accounting
     local chosen = candidates[1]
     lastPlaceTime = os.clock()
 
+    -- Step A: If the item exists as a Tool in Backpack, equip it to Character
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if backpack and char then
+        local tool = backpack:FindFirstChild(chosen.Name)
+        if tool and tool:IsA("Tool") then
+            pcall(function() tool.Parent = char end)
+            task.wait(0.15)
+        end
+    end
+
+    -- Step B: Fire ProximityPrompt on empty incubator/stand if available
+    local base = findPlayerBase()
+    if base and fireproximityprompt then
+        for _, desc in ipairs(base:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") and desc.Enabled then
+                local act = tostring(desc.ActionText):lower()
+                local obj = tostring(desc.ObjectText):lower()
+                if act:find("place") or act:find("put") or act:find("add") or act:find("incub") or
+                   obj:find("egg") or obj:find("crate") or obj:find("lootbox") or obj:find("stand") then
+                    pcall(function() fireproximityprompt(desc) end)
+                    task.wait(0.1)
+                end
+            end
+        end
+    end
+
+    -- Step C: Remote Placement with full parameter variants
     if chosen.Type == "Egg" then
-        fireRemote(Remotes.PlaceEgg, chosen.Name)
-        fireRemote(Remotes.PlaceEgg, { ConfigName = chosen.Name })
+        local remote = Remotes.PlaceEgg
+        if remote then
+            if remote.Call then
+                pcall(function() remote:Call(chosen.Name, freeSlot):Await() end)
+                pcall(function() remote:Call(freeSlot, chosen.Name):Await() end)
+                pcall(function() remote:Call(chosen.Name):Await() end)
+                pcall(function() remote:Call({ ConfigName = chosen.Name, Slot = freeSlot }):Await() end)
+                pcall(function() remote:Call({ ConfigName = chosen.Name }):Await() end)
+            end
+            if remote.Fire then
+                pcall(function() remote:Fire(chosen.Name, freeSlot) end)
+                pcall(function() remote:Fire(freeSlot, chosen.Name) end)
+                pcall(function() remote:Fire(chosen.Name) end)
+                pcall(function() remote:Fire({ ConfigName = chosen.Name, Slot = freeSlot }) end)
+            end
+        end
+        print(string.format("[SAKURA] Placed Egg: %s into Slot: %d", chosen.Name, freeSlot))
     else
-        fireRemote(Remotes.PlaceFloatLootbox, chosen.Name)
-        fireRemote(Remotes.PlaceFloatLootbox, { ConfigName = chosen.Name })
+        local remote = Remotes.PlaceFloatLootbox
+        if remote then
+            if remote.Call then
+                pcall(function() remote:Call(chosen.Name, freeSlot):Await() end)
+                pcall(function() remote:Call(freeSlot, chosen.Name):Await() end)
+                pcall(function() remote:Call(chosen.Name):Await() end)
+                pcall(function() remote:Call({ ConfigName = chosen.Name, Slot = freeSlot }):Await() end)
+                pcall(function() remote:Call({ ConfigName = chosen.Name }):Await() end)
+            end
+            if remote.Fire then
+                pcall(function() remote:Fire(chosen.Name, freeSlot) end)
+                pcall(function() remote:Fire(freeSlot, chosen.Name) end)
+                pcall(function() remote:Fire(chosen.Name) end)
+                pcall(function() remote:Fire({ ConfigName = chosen.Name, Slot = freeSlot }) end)
+            end
+        end
         fireRemote(Remotes.OpenLuckyblock, chosen.Name)
+        print(string.format("[SAKURA] Placed Box: %s into Slot: %d", chosen.Name, freeSlot))
     end
 end
 
@@ -490,9 +730,9 @@ task.spawn(function()
         -- Step 2: Place new item ONLY if space is available
         pcall(processPlaceItemsIfSpace)
 
-        -- Check Auction House direct buy every 15 seconds
+        -- Check Auction House direct buy every 60 seconds (hourly restock)
         auctionTimer = auctionTimer + 1.5
-        if auctionTimer >= 15 then
+        if auctionTimer >= 60 then
             auctionTimer = 0
             if Config.AutoBuyAuctionHouse then
                 pcall(buyAuctionHouseDirect)
@@ -915,10 +1155,20 @@ BoxStockLabel.Parent = BoxCard
 local AuctionCard = makeCard(PageShop, "Auction House (1-Hour Direct Buy, No Bids)")
 makeToggle(AuctionCard, "Auto Buy Hourly Direct-Buy Items", Config.AutoBuyAuctionHouse, function(v)
     Config.AutoBuyAuctionHouse = v
-    if v then buyAuctionHouseDirect() end
+    if v then task.spawn(buyAuctionHouseDirect) end
 end)
+local AuctionStatusLabel = Instance.new("TextLabel")
+AuctionStatusLabel.Size = UDim2.new(1, 0, 0, 16)
+AuctionStatusLabel.BackgroundTransparency = 1
+AuctionStatusLabel.Font = Enum.Font.Gotham
+AuctionStatusLabel.TextSize = 10
+AuctionStatusLabel.TextColor3 = Theme.TextDim
+AuctionStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+AuctionStatusLabel.Text = "Stock: Ready (checks hourly restock, direct buy only)"
+AuctionStatusLabel.Parent = AuctionCard
+
 makeButton(AuctionCard, "⚡ Buy Auction House Stock Now", function()
-    buyAuctionHouseDirect()
+    task.spawn(buyAuctionHouseDirect)
 end)
 
 -- ========================================================================================
