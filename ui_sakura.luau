@@ -1,22 +1,20 @@
 --!nocheck
 --[[
   ========================================================================================
-  🌸 PULL A LUCKY FISH — SAKURA UI (PREMIUM EDITION)
+  🌸 PULL A LUCKY FISH — SAKURA CLEAN AUTO-COLLECT & MULTI-BUY
   ========================================================================================
-  Fichier      : ui_sakura.luau
-  Auteur       : oufrob9 (PullALuckyFish)
-  Style        : Sakura / Cherry Blossom (Pastels doux, Icônes réelles, Animations fluides)
-  Description  : Interface visuelle haute fidélité pour le script de Pull A Lucky Fish.
-                 Organise parfaitement toutes les catégories demandées.
-                 Architecture avec callbacks propres prêts à brancher le backend après test.
-  Usage        : loadstring(game:HttpGet("https://raw.githubusercontent.com/oufrob9/PullALuckyFish/main/ui_sakura.luau"))()
+  Fonctionnalités réelles & fonctionnelles :
+    1. 💰 Auto-Collect Cash en continu sur tous les slots de base (propre et efficace)
+    2. 🥚 Auto-Buy Œufs avec MULTI-SÉLECTION (Cochez plusieurs œufs souhaités)
+    3. 📦 Auto-Buy Boîtes/Caisses avec MULTI-SÉLECTION (Cochez plusieurs boîtes)
+    4. 📊 Affichage en temps réel du cash, du stock en boutique et des gains
   ========================================================================================
 ]]
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local VirtualUser = game:GetService("VirtualUser")
 local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
@@ -26,799 +24,726 @@ if not LocalPlayer then
 end
 
 -- ========================================================================================
--- 🎨 CONFIGURATION DU THÈME SAKURA
+-- 1. CONNEXION SÉCURISÉE AUX SERVICES DU JEU
 -- ========================================================================================
-local SakuraTheme = {
-    Background    = Color3.fromRGB(24, 17, 24),     -- Fond sombre aux reflets fleurs de cerisier
-    Card          = Color3.fromRGB(33, 23, 33),     -- Conteneur de carte légèrement surélevé
-    CardSub       = Color3.fromRGB(42, 29, 42),     -- Sous-éléments & champs
-    Accent        = Color3.fromRGB(255, 117, 151),  -- Rose vif cerisier (Sakura Pink)
-    AccentSoft    = Color3.fromRGB(255, 182, 193),  -- Rose pastel doux (Light Pink)
-    AccentGlow    = Color3.fromRGB(255, 204, 218),  -- Éclat blanc-rosé
-    TextLight     = Color3.fromRGB(255, 245, 248),  -- Texte principal contrasté
-    TextMuted     = Color3.fromRGB(214, 178, 194),  -- Texte secondaire discret
-    Stroke        = Color3.fromRGB(255, 117, 151),  -- Bordure subtile
-    ToggleOff     = Color3.fromRGB(56, 40, 56),     -- Interrupteur éteint
-    ToggleOn      = Color3.fromRGB(255, 117, 151),  -- Interrupteur allumé
-    Danger        = Color3.fromRGB(255, 95, 115),   -- Boutons d'action critique
-    Success       = Color3.fromRGB(120, 220, 160),  -- Validation
-}
+local Shared = ReplicatedStorage:WaitForChild("shared", 10)
+local Client = ReplicatedStorage:WaitForChild("client", 10)
 
--- Vrais Icônes Roblox Asset IDs
-local Icons = {
-    SakuraLogo  = "rbxassetid://10723415903", -- Blossom / Fleur
-    Farm        = "rbxassetid://10709791437", -- Épée / Outil / Force
-    Boxes       = "rbxassetid://10709819149", -- Boîte cadeau / Box
-    Sell        = "rbxassetid://10723346959", -- Dollar / Pièces
-    DNA         = "rbxassetid://10734950309", -- Tube à essai / Labo
-    Teleport    = "rbxassetid://10723407389", -- Map pin / Navigation
-    Settings    = "rbxassetid://10734950020", -- Rouage / Configuration
-    Check       = "rbxassetid://10709790644", -- Coche
-    Chevron     = "rbxassetid://10709790948", -- Flèche dropdown
-}
+if not Shared or not Client then
+    warn("[SAKURA] Dossiers partagés non trouvés.")
+    return
+end
+
+local Remotes = require(Shared:WaitForChild("Remotes", 10))
+local CPD = require(Client:WaitForChild("ClientPlayerData", 10))
+
+-- Helper d'état direct (Reflex / Profile)
+local function getState()
+    if CPD and CPD.serverProfile and CPD.serverProfile.getState then
+        local ok, s = pcall(function() return CPD.serverProfile:getState() end)
+        if ok and type(s) == "table" then return s end
+    end
+    if CPD and CPD.getState then
+        local ok, s = pcall(function() return CPD:getState() end)
+        if ok and type(s) == "table" then return s end
+    end
+    return {}
+end
+
+-- Helper d'appel Red Remote fiable (supporte :Fire, :fire et :Call)
+local function fireRemote(remoteObj, ...)
+    if not remoteObj then return false end
+    local args = table.pack(...)
+    local success = false
+
+    -- Essai 1 : Red Event :Fire
+    if typeof(remoteObj) == "table" and remoteObj.Fire then
+        local ok = pcall(function() remoteObj:Fire(table.unpack(args, 1, args.n)) end)
+        if ok then success = true end
+    end
+    -- Essai 2 : Red Event :fire
+    if not success and typeof(remoteObj) == "table" and remoteObj.fire then
+        local ok = pcall(function() remoteObj:fire(table.unpack(args, 1, args.n)) end)
+        if ok then success = true end
+    end
+    -- Essai 3 : Red Function :Call
+    if typeof(remoteObj) == "table" and remoteObj.Call then
+        pcall(function()
+            task.spawn(function()
+                remoteObj:Call(table.unpack(args, 1, args.n)):Await()
+            end)
+        end)
+        success = true
+    end
+    -- Essai 4 : Instance Roblox standard
+    if typeof(remoteObj) == "Instance" and remoteObj:IsA("RemoteEvent") then
+        pcall(function() remoteObj:FireServer(table.unpack(args, 1, args.n)) end)
+        success = true
+    end
+
+    return success
+end
+
+-- Formatage de nombres
+local SUFFIXES = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc" }
+local function formatNumber(n)
+    n = tonumber(n) or 0
+    if n < 1000 then return tostring(math.floor(n)) end
+    local i = 1
+    while n >= 1000 and i < #SUFFIXES do
+        n = n / 1000
+        i = i + 1
+    end
+    return string.format("%.2f %s", n, SUFFIXES[i])
+end
 
 -- ========================================================================================
--- 💾 ÉTAT GLOBAL & CALLBACKS (Prêts pour branchement du backend)
+-- 2. CONFIGURATION & ÉTAT INTERNE
 -- ========================================================================================
-local SakuraConfig = {
-    -- Auto Farm
-    AutoTrain            = false,
-    TrainCPS             = 12,
-    AutoCollectCash      = true,
-    CollectInterval      = 3,
-    UpgradeAllFish       = false,
-    UpgradeReserveCash   = 1000,
-    AutoEquipBestTool    = true,
+local Config = {
+    -- Auto Collect Cash
+    AutoCollectCash  = true,
+    CollectInterval  = 2.0, -- secondes
 
-    -- Boxes & Eggs
-    AutoOpenBoxes        = false,
-    AutoHatchEggs        = false,
-    AutoSkipEggTimer     = false,
-    AutoBuyEggs          = false,
-    SelectedEggType      = "ForestEgg",
-    AutoBuyBoxes         = false,
-    SelectedBoxType      = "CommonFloatCrate",
-
-    -- Vente Avancée
-    AutoSellMaster       = false,
-    KeepMutations        = true,
-    MinMutationsToKeep   = 1,
-    SellRarities         = {
-        Common    = true,
-        Uncommon  = true,
-        Rare      = false,
-        Epic      = false,
-        Legendary = false,
-        Mythic    = false,
+    -- Auto Buy Eggs
+    AutoBuyEggs      = false,
+    SelectedEggs     = {
+        ["ForestEgg"] = true,
+        ["FarmEgg"]   = true,
+        ["OceanEgg"]  = false,
+        ["MythicEgg"] = false,
     },
-    BlacklistFish        = {},
 
-    -- DNA Lab
-    AutoGrindDNA         = false,
-    GrindRarities        = {
-        Common   = true,
-        Uncommon = true,
+    -- Auto Buy Boxes
+    AutoBuyBoxes     = false,
+    SelectedBoxes    = {
+        ["CommonFloatCrate"]       = true,
+        ["RareFloatCrate"]         = true,
+        ["EpicFloatCrate"]         = false,
+        ["LegendaryFloatCrate"]    = false,
+        ["MythicFloatCrate"]       = false,
+        ["CatFloatCrate"]          = false,
+        ["FunctionalObjectsCrate"] = false,
     },
-    AutoStartResearch    = false,
-    AutoClaimDNA         = false,
-
-    -- Utilitaires
-    AntiAFK              = true,
-    WalkSpeed            = 16,
-    Noclip               = false,
-    HidePets             = false,
-    NoCutscenes          = false,
-    GpuSaver             = false,
 }
 
-local SakuraCallbacks = {
-    onToggle = function(name, value)
-        print("[SAKURA UI] Toggle changé :", name, "=", value)
-    end,
-    onSlider = function(name, value)
-        print("[SAKURA UI] Slider ajusté :", name, "=", value)
-    end,
-    onDropdown = function(name, selected)
-        print("[SAKURA UI] Dropdown sélectionné :", name, "=", selected)
-    end,
-    onAction = function(name)
-        print("[SAKURA UI] Action déclenchée :", name)
-    end,
+local Stats = {
+    TotalCollected = 0,
+    LastCollectTime = 0,
+    TotalEggsBought = 0,
+    TotalBoxesBought = 0,
 }
 
 -- ========================================================================================
--- 🖥️ CRÉATION DU CONTENEUR SCREEN GUI
+-- 3. LOGIQUE MÉTIER RÉELLE (COLLECTE DU CASH & ACHAT DU STOCK)
 -- ========================================================================================
+
+-- Collecte propre de chaque slot de la base
+local function collectCashOnce()
+    local s = getState()
+    local slots = s.baseSlots or {}
+    local collectedSomething = false
+
+    for slotIndex, slotData in pairs(slots) do
+        -- Le remote attend l'index du slot sous forme de string et de number
+        fireRemote(Remotes.RequestCollectCash, tostring(slotIndex))
+        fireRemote(Remotes.RequestCollectCash, tonumber(slotIndex))
+        collectedSomething = true
+    end
+
+    -- Activation des remotes globaux de récolte
+    fireRemote(Remotes.RequestCollectCash)
+    fireRemote(Remotes.AutoCollectActivated)
+    fireRemote(Remotes.RequestUseAutoCollect, true)
+
+    Stats.LastCollectTime = os.clock()
+    return collectedSomething
+end
+
+-- Achat automatique des œufs sélectionnés
+local function checkAndBuyEggs()
+    if not Config.AutoBuyEggs then return end
+    local s = getState()
+    local shopItems = s.eggShopItems or {}
+    local soldSlots = s.eggShopSoldSlots or {}
+
+    for slotIdx = 1, 3 do
+        local eggName = shopItems[slotIdx]
+        local isSold = soldSlots[slotIdx] == true
+
+        if eggName and not isSold and Config.SelectedEggs[eggName] then
+            -- Tente l'achat par numéro de slot et par nom
+            fireRemote(Remotes.BuyEgg, slotIdx)
+            fireRemote(Remotes.BuyEgg, tostring(slotIdx))
+            fireRemote(Remotes.BuyEgg, eggName)
+            Stats.TotalEggsBought = Stats.TotalEggsBought + 1
+            task.wait(0.3)
+        end
+    end
+end
+
+-- Achat automatique des boîtes/caisses sélectionnées
+local function checkAndBuyBoxes()
+    if not Config.AutoBuyBoxes then return end
+    local s = getState()
+    local shopItems = s.lootboxShopItems or {}
+    local soldSlots = s.lootboxShopSoldSlots or {}
+
+    for slotIdx = 1, 3 do
+        local boxName = shopItems[slotIdx]
+        local isSold = soldSlots[slotIdx] == true
+
+        if boxName and not isSold and Config.SelectedBoxes[boxName] then
+            -- Tente l'achat par numéro de slot et par nom
+            fireRemote(Remotes.BuyFloatLootbox, slotIdx)
+            fireRemote(Remotes.BuyFloatLootbox, tostring(slotIdx))
+            fireRemote(Remotes.BuyFloatLootbox, boxName)
+            Stats.TotalBoxesBought = Stats.TotalBoxesBought + 1
+            task.wait(0.3)
+        end
+    end
+end
+
+-- ========================================================================================
+-- 4. BOUCLE DE FOND ASYNCHRONE
+-- ========================================================================================
+_G.__SAKURA_LUCKYFISH = (_G.__SAKURA_LUCKYFISH or 0) + 1
+local CURRENT_GEN = _G.__SAKURA_LUCKYFISH
+
+task.spawn(function()
+    while _G.__SAKURA_LUCKYFISH == CURRENT_GEN do
+        if Config.AutoCollectCash then
+            pcall(collectCashOnce)
+        end
+        if Config.AutoBuyEggs then
+            pcall(checkAndBuyEggs)
+        end
+        if Config.AutoBuyBoxes then
+            pcall(checkAndBuyBoxes)
+        end
+        task.wait(math.max(1, Config.CollectInterval))
+    end
+end)
+
+-- ========================================================================================
+-- 5. INTERFACE SAKURA GRAPHIQUE ÉLÉGANTE & COMPACTE
+-- ========================================================================================
+local Theme = {
+    Bg        = Color3.fromRGB(24, 17, 24),
+    Card      = Color3.fromRGB(33, 23, 33),
+    CardSub   = Color3.fromRGB(44, 30, 44),
+    Accent    = Color3.fromRGB(255, 117, 151),
+    AccentSoft= Color3.fromRGB(255, 182, 193),
+    Text      = Color3.fromRGB(255, 245, 248),
+    TextDim   = Color3.fromRGB(214, 178, 194),
+    Green     = Color3.fromRGB(120, 230, 160),
+    Red       = Color3.fromRGB(255, 100, 120),
+}
+
 local targetParent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
-if targetParent:FindFirstChild("LuckyFish_SakuraUI") then
-    targetParent:FindFirstChild("LuckyFish_SakuraUI"):Destroy()
+if targetParent:FindFirstChild("SakuraLuckyFish_Clean") then
+    targetParent:FindFirstChild("SakuraLuckyFish_Clean"):Destroy()
 end
 
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "LuckyFish_SakuraUI"
+ScreenGui.Name = "SakuraLuckyFish_Clean"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = targetParent
 
--- Helper Tween
-local function tween(inst, props, dur, style, dir)
-    dur = dur or 0.25
-    style = style or Enum.EasingStyle.Quart
-    dir = dir or Enum.EasingDirection.Out
-    local tw = TweenService:Create(inst, TweenInfo.new(dur, style, dir), props)
-    tw:Play()
-    return tw
-end
-
--- ========================================================================================
--- 🪟 FENÊTRE PRINCIPALE
--- ========================================================================================
-local MainFrame = Instance.new("Frame")
-MainFrame.Name = "SakuraMain"
-MainFrame.Size = UDim2.new(0, 680, 0, 480)
-MainFrame.Position = UDim2.new(0.5, -340, 0.5, -240)
-MainFrame.BackgroundColor3 = SakuraTheme.Background
-MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.ClipsDescendants = false
-MainFrame.Parent = ScreenGui
+-- Fenêtre Principale
+local Main = Instance.new("Frame")
+Main.Name = "MainFrame"
+Main.Size = UDim2.new(0, 520, 0, 440)
+Main.Position = UDim2.new(0.5, -260, 0.5, -220)
+Main.BackgroundColor3 = Theme.Bg
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Parent = ScreenGui
 
 local MainCorner = Instance.new("UICorner")
-MainCorner.CornerRadius = UDim.new(0, 14)
-MainCorner.Parent = MainFrame
+MainCorner.CornerRadius = UDim.new(0, 12)
+MainCorner.Parent = Main
 
--- Bordure dégradée éclat Sakura
 local MainStroke = Instance.new("UIStroke")
-MainStroke.Thickness = 1.8
-MainStroke.Color = SakuraTheme.Accent
-MainStroke.Parent = MainFrame
+MainStroke.Color = Theme.Accent
+MainStroke.Thickness = 1.6
+MainStroke.Parent = Main
 
-local MainGradient = Instance.new("UIGradient")
-MainGradient.Color = ColorSequence.new({
-    ColorSequenceKeypoint.new(0.0, SakuraTheme.Accent),
-    ColorSequenceKeypoint.new(0.5, SakuraTheme.AccentSoft),
-    ColorSequenceKeypoint.new(1.0, SakuraTheme.Accent),
-})
-MainGradient.Rotation = 45
-MainGradient.Parent = MainStroke
-
--- Drag & Drop fluide
+-- Drag & Drop
 local dragging, dragStart, startPos
-MainFrame.InputBegan:Connect(function(input)
+Main.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         dragging = true
         dragStart = input.Position
-        startPos = MainFrame.Position
+        startPos = Main.Position
         input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
         end)
     end
 end)
 UserInputService.InputChanged:Connect(function(input)
     if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - dragStart
-        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
     end
 end)
 
--- ========================================================================================
--- 🌸 SIDEBAR GAUCHE (NAVIGATION PAR ONGLETS & ICÔNES)
--- ========================================================================================
-local Sidebar = Instance.new("Frame")
-Sidebar.Name = "Sidebar"
-Sidebar.Size = UDim2.new(0, 180, 1, 0)
-Sidebar.BackgroundColor3 = Color3.fromRGB(29, 20, 29)
-Sidebar.BorderSizePixel = 0
-Sidebar.Parent = MainFrame
+-- Barre Supérieure
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 42)
+TopBar.BackgroundColor3 = Theme.Card
+TopBar.BorderSizePixel = 0
+TopBar.Parent = Main
 
-local SideCorner = Instance.new("UICorner")
-SideCorner.CornerRadius = UDim.new(0, 14)
-SideCorner.Parent = Sidebar
+local TopCorner = Instance.new("UICorner")
+TopCorner.CornerRadius = UDim.new(0, 12)
+TopCorner.Parent = TopBar
 
--- Masquer l'arrondi droit de la sidebar pour fusionner avec le contenu
-local SidePatch = Instance.new("Frame")
-SidePatch.Size = UDim2.new(0, 14, 1, 0)
-SidePatch.Position = UDim2.new(1, -14, 0, 0)
-SidePatch.BackgroundColor3 = Color3.fromRGB(29, 20, 29)
-SidePatch.BorderSizePixel = 0
-SidePatch.Parent = Sidebar
+local TopTitle = Instance.new("TextLabel")
+TopTitle.Size = UDim2.new(1, -90, 1, 0)
+TopTitle.Position = UDim2.new(0, 14, 0, 0)
+TopTitle.BackgroundTransparency = 1
+TopTitle.Text = "🌸 SAKURA — Auto-Collect & Multi-Buy"
+TopTitle.Font = Enum.Font.GothamBold
+TopTitle.TextSize = 13
+TopTitle.TextColor3 = Theme.Text
+TopTitle.TextXAlignment = Enum.TextXAlignment.Left
+TopTitle.Parent = TopBar
 
--- En-tête Sidebar avec Logo Sakura
-local HeaderBox = Instance.new("Frame")
-HeaderBox.Size = UDim2.new(1, 0, 0, 60)
-HeaderBox.BackgroundTransparency = 1
-HeaderBox.Parent = Sidebar
-
-local LogoIcon = Instance.new("ImageLabel")
-LogoIcon.Size = UDim2.new(0, 26, 0, 26)
-LogoIcon.Position = UDim2.new(0, 14, 0.5, -13)
-LogoIcon.BackgroundTransparency = 1
-LogoIcon.Image = Icons.SakuraLogo
-LogoIcon.ImageColor3 = SakuraTheme.Accent
-LogoIcon.Parent = HeaderBox
-
-local TitleText = Instance.new("TextLabel")
-TitleText.Size = UDim2.new(1, -50, 0, 20)
-TitleText.Position = UDim2.new(0, 48, 0, 12)
-TitleText.BackgroundTransparency = 1
-TitleText.Text = "SAKURA HUB"
-TitleText.Font = Enum.Font.GothamBold
-TitleText.TextSize = 13
-TitleText.TextColor3 = SakuraTheme.TextLight
-TitleText.TextXAlignment = Enum.TextXAlignment.Left
-TitleText.Parent = HeaderBox
-
-local SubTitleText = Instance.new("TextLabel")
-SubTitleText.Size = UDim2.new(1, -50, 0, 14)
-SubTitleText.Position = UDim2.new(0, 48, 0, 32)
-SubTitleText.BackgroundTransparency = 1
-SubTitleText.Text = "Pull A Lucky Fish"
-SubTitleText.Font = Enum.Font.Gotham
-SubTitleText.TextSize = 10
-SubTitleText.TextColor3 = SakuraTheme.AccentSoft
-SubTitleText.TextXAlignment = Enum.TextXAlignment.Left
-SubTitleText.Parent = HeaderBox
-
--- Séparateur délicat
-local Sep1 = Instance.new("Frame")
-Sep1.Size = UDim2.new(1, -24, 0, 1)
-Sep1.Position = UDim2.new(0, 12, 0, 60)
-Sep1.BackgroundColor3 = Color3.fromRGB(48, 33, 48)
-Sep1.BorderSizePixel = 0
-Sep1.Parent = Sidebar
-
--- Liste des onglets
-local TabsScroll = Instance.new("ScrollingFrame")
-TabsScroll.Size = UDim2.new(1, 0, 1, -110)
-TabsScroll.Position = UDim2.new(0, 0, 0, 66)
-TabsScroll.BackgroundTransparency = 1
-TabsScroll.BorderSizePixel = 0
-TabsScroll.ScrollBarThickness = 0
-TabsScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-TabsScroll.Parent = Sidebar
-
-local TabsLayout = Instance.new("UIListLayout")
-TabsLayout.Padding = UDim.new(0, 4)
-TabsLayout.Parent = TabsScroll
-
--- Pied de page Sidebar
-local FootBox = Instance.new("Frame")
-FootBox.Size = UDim2.new(1, 0, 0, 40)
-FootBox.Position = UDim2.new(0, 0, 1, -40)
-FootBox.BackgroundTransparency = 1
-FootBox.Parent = Sidebar
-
-local FootText = Instance.new("TextLabel")
-FootText.Size = UDim2.new(1, -20, 1, 0)
-FootText.Position = UDim2.new(0, 12, 0, 0)
-FootText.BackgroundTransparency = 1
-FootText.Text = "v1.0.0 • Main Account Ready"
-FootText.Font = Enum.Font.Gotham
-FootText.TextSize = 9
-FootText.TextColor3 = SakuraTheme.TextMuted
-FootText.TextXAlignment = Enum.TextXAlignment.Left
-FootText.Parent = FootBox
-
--- ========================================================================================
--- 📄 ZONE DE CONTENU PRINCIPALE (PAGES DES ONGLETS)
--- ========================================================================================
-local ContentArea = Instance.new("Frame")
-ContentArea.Name = "ContentArea"
-ContentArea.Size = UDim2.new(1, -188, 1, -44)
-ContentArea.Position = UDim2.new(0, 184, 0, 38)
-ContentArea.BackgroundTransparency = 1
-ContentArea.Parent = MainFrame
-
--- Barre supérieure de contrôle (Titre de l'onglet actif + Bouton Réduire / Fermer)
-local TopControlBar = Instance.new("Frame")
-TopControlBar.Size = UDim2.new(1, -180, 0, 36)
-TopControlBar.Position = UDim2.new(0, 180, 0, 0)
-TopControlBar.BackgroundTransparency = 1
-TopControlBar.Parent = MainFrame
-
-local ActivePageTitle = Instance.new("TextLabel")
-ActivePageTitle.Size = UDim2.new(1, -80, 1, 0)
-ActivePageTitle.Position = UDim2.new(0, 14, 0, 0)
-ActivePageTitle.BackgroundTransparency = 1
-ActivePageTitle.Text = "🌸 Auto-Farm & Force"
-ActivePageTitle.Font = Enum.Font.GothamBold
-ActivePageTitle.TextSize = 13
-ActivePageTitle.TextColor3 = SakuraTheme.TextLight
-ActivePageTitle.TextXAlignment = Enum.TextXAlignment.Left
-ActivePageTitle.Parent = TopControlBar
-
+-- Boutons Réduire et Fermer
 local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.new(0, 26, 0, 26)
-CloseBtn.Position = UDim2.new(1, -34, 0.5, -13)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(44, 28, 40)
+CloseBtn.Size = UDim2.new(0, 28, 0, 28)
+CloseBtn.Position = UDim2.new(1, -34, 0.5, -14)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(50, 30, 42)
 CloseBtn.Text = "✕"
 CloseBtn.Font = Enum.Font.GothamBold
 CloseBtn.TextSize = 12
-CloseBtn.TextColor3 = SakuraTheme.AccentSoft
-CloseBtn.Parent = TopControlBar
-
+CloseBtn.TextColor3 = Theme.AccentSoft
+CloseBtn.Parent = TopBar
 local CloseCorner = Instance.new("UICorner")
 CloseCorner.CornerRadius = UDim.new(0, 6)
 CloseCorner.Parent = CloseBtn
-
-CloseBtn.MouseButton1Click:Connect(function()
-    ScreenGui:Destroy()
-end)
-
--- Bouton Fleur Sakura flottant pour ré-ouvrir si réduit
-local FloatToggleBtn = Instance.new("ImageButton")
-FloatToggleBtn.Name = "SakuraFloatButton"
-FloatToggleBtn.Size = UDim2.new(0, 42, 0, 42)
-FloatToggleBtn.Position = UDim2.new(0, 20, 0.5, -21)
-FloatToggleBtn.BackgroundColor3 = SakuraTheme.Background
-FloatToggleBtn.Image = Icons.SakuraLogo
-FloatToggleBtn.ImageColor3 = SakuraTheme.Accent
-FloatToggleBtn.Visible = false
-FloatToggleBtn.Parent = ScreenGui
-
-local FloatCorner = Instance.new("UICorner")
-FloatCorner.CornerRadius = UDim.new(1, 0)
-FloatCorner.Parent = FloatToggleBtn
-
-local FloatStroke = Instance.new("UIStroke")
-FloatStroke.Color = SakuraTheme.Accent
-FloatStroke.Thickness = 1.5
-FloatStroke.Parent = FloatToggleBtn
-
-FloatToggleBtn.MouseButton1Click:Connect(function()
-    MainFrame.Visible = true
-    FloatToggleBtn.Visible = false
-end)
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
 
 local MinBtn = Instance.new("TextButton")
-MinBtn.Size = UDim2.new(0, 26, 0, 26)
-MinBtn.Position = UDim2.new(1, -66, 0.5, -13)
-MinBtn.BackgroundColor3 = Color3.fromRGB(44, 28, 40)
+MinBtn.Size = UDim2.new(0, 28, 0, 28)
+MinBtn.Position = UDim2.new(1, -68, 0.5, -14)
+MinBtn.BackgroundColor3 = Color3.fromRGB(50, 30, 42)
 MinBtn.Text = "—"
 MinBtn.Font = Enum.Font.GothamBold
 MinBtn.TextSize = 12
-MinBtn.TextColor3 = SakuraTheme.AccentSoft
-MinBtn.Parent = TopControlBar
-
+MinBtn.TextColor3 = Theme.AccentSoft
+MinBtn.Parent = TopBar
 local MinCorner = Instance.new("UICorner")
 MinCorner.CornerRadius = UDim.new(0, 6)
 MinCorner.Parent = MinBtn
 
+-- Bouton Flottant Fleur Sakura
+local FloatBtn = Instance.new("TextButton")
+FloatBtn.Size = UDim2.new(0, 44, 0, 44)
+FloatBtn.Position = UDim2.new(0, 20, 0.5, -22)
+FloatBtn.BackgroundColor3 = Theme.Bg
+FloatBtn.Text = "🌸"
+FloatBtn.TextSize = 22
+FloatBtn.Visible = false
+FloatBtn.Parent = ScreenGui
+local FloatCorner = Instance.new("UICorner")
+FloatCorner.CornerRadius = UDim.new(1, 0)
+FloatCorner.Parent = FloatBtn
+local FloatStroke = Instance.new("UIStroke")
+FloatStroke.Color = Theme.Accent
+FloatStroke.Thickness = 1.5
+FloatStroke.Parent = FloatBtn
+FloatBtn.MouseButton1Click:Connect(function()
+    Main.Visible = true
+    FloatBtn.Visible = false
+end)
 MinBtn.MouseButton1Click:Connect(function()
-    MainFrame.Visible = false
-    FloatToggleBtn.Visible = true
+    Main.Visible = false
+    FloatBtn.Visible = true
 end)
 
--- ========================================================================================
--- 🛠️ SYSTÈME DE COMPOSANTS UI SAKURA (Cards, Toggles, Sliders, Dropdowns, Buttons)
--- ========================================================================================
-local Pages = {}
+-- Barre de Navigation Onglets
+local NavFrame = Instance.new("Frame")
+NavFrame.Size = UDim2.new(1, -20, 0, 32)
+NavFrame.Position = UDim2.new(0, 10, 0, 48)
+NavFrame.BackgroundTransparency = 1
+NavFrame.Parent = Main
+
+local NavLayout = Instance.new("UIListLayout")
+NavLayout.FillDirection = Enum.FillDirection.Horizontal
+NavLayout.Padding = UDim.new(0, 8)
+NavLayout.Parent = NavFrame
+
+-- Pages Container
+local Container = Instance.new("Frame")
+Container.Size = UDim2.new(1, -20, 1, -92)
+Container.Position = UDim2.new(0, 10, 0, 84)
+Container.BackgroundTransparency = 1
+Container.Parent = Main
+
+local Tabs = {}
 local TabButtons = {}
 
-local function createPage(pageId, pageTitle, iconAsset)
-    local pageScroll = Instance.new("ScrollingFrame")
-    pageScroll.Name = "Page_" .. pageId
-    pageScroll.Size = UDim2.new(1, -10, 1, -10)
-    pageScroll.Position = UDim2.new(0, 5, 0, 5)
-    pageScroll.BackgroundTransparency = 1
-    pageScroll.BorderSizePixel = 0
-    pageScroll.ScrollBarThickness = 4
-    pageScroll.ScrollBarImageColor3 = SakuraTheme.Accent
-    pageScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    pageScroll.Visible = false
-    pageScroll.Parent = ContentArea
+local function createTab(name, title)
+    local page = Instance.new("ScrollingFrame")
+    page.Name = "Page_" .. name
+    page.Size = UDim2.new(1, 0, 1, 0)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.ScrollBarThickness = 4
+    page.ScrollBarImageColor3 = Theme.Accent
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.Visible = false
+    page.Parent = Container
 
     local pageLayout = Instance.new("UIListLayout")
-    pageLayout.Padding = UDim.new(0, 10)
-    pageLayout.Parent = pageScroll
+    pageLayout.Padding = UDim.new(0, 8)
+    pageLayout.Parent = pageScroll or page
 
-    -- Bouton dans la sidebar
-    local tabBtn = Instance.new("TextButton")
-    tabBtn.Size = UDim2.new(1, -16, 0, 36)
-    tabBtn.Position = UDim2.new(0, 8, 0, 0)
-    tabBtn.BackgroundColor3 = Color3.fromRGB(34, 24, 34)
-    tabBtn.BackgroundTransparency = 1
-    tabBtn.Text = ""
-    tabBtn.AutoButtonColor = false
-    tabBtn.Parent = TabsScroll
-
-    local tabCorner = Instance.new("UICorner")
-    tabCorner.CornerRadius = UDim.new(0, 8)
-    tabCorner.Parent = tabBtn
-
-    local tabIcon = Instance.new("ImageLabel")
-    tabIcon.Size = UDim2.new(0, 18, 0, 18)
-    tabIcon.Position = UDim2.new(0, 10, 0.5, -9)
-    tabIcon.BackgroundTransparency = 1
-    tabIcon.Image = iconAsset or Icons.SakuraLogo
-    tabIcon.ImageColor3 = SakuraTheme.TextMuted
-    tabIcon.Parent = tabBtn
-
-    local tabTitle = Instance.new("TextLabel")
-    tabTitle.Size = UDim2.new(1, -38, 1, 0)
-    tabTitle.Position = UDim2.new(0, 34, 0, 0)
-    tabTitle.BackgroundTransparency = 1
-    tabTitle.Text = pageTitle
-    tabTitle.Font = Enum.Font.GothamSemibold
-    tabTitle.TextSize = 11
-    tabTitle.TextColor3 = SakuraTheme.TextMuted
-    tabTitle.TextXAlignment = Enum.TextXAlignment.Left
-    tabTitle.Parent = tabBtn
-
-    Pages[pageId] = pageScroll
-    TabButtons[pageId] = { Button = tabBtn, Icon = tabIcon, Title = tabTitle, RawTitle = pageTitle }
-
-    tabBtn.MouseButton1Click:Connect(function()
-        for id, p in pairs(Pages) do
-            p.Visible = (id == pageId)
-            local tb = TabButtons[id]
-            if id == pageId then
-                tween(tb.Button, { BackgroundTransparency = 0, BackgroundColor3 = Color3.fromRGB(48, 30, 48) }, 0.2)
-                tween(tb.Icon, { ImageColor3 = SakuraTheme.Accent }, 0.2)
-                tween(tb.Title, { TextColor3 = SakuraTheme.TextLight }, 0.2)
-                ActivePageTitle.Text = "🌸 " .. tb.RawTitle
-            else
-                tween(tb.Button, { BackgroundTransparency = 1 }, 0.2)
-                tween(tb.Icon, { ImageColor3 = SakuraTheme.TextMuted }, 0.2)
-                tween(tb.Title, { TextColor3 = SakuraTheme.TextMuted }, 0.2)
-            end
-        end
-    end)
-
-    return pageScroll
-end
-
--- Création d'une Carte (Section)
-local function createCard(parent, title)
-    local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, -6, 0, 0)
-    card.BackgroundColor3 = SakuraTheme.Card
-    card.BorderSizePixel = 0
-    card.AutomaticSize = Enum.AutomaticSize.Y
-    card.Parent = parent
-
-    local cardCorner = Instance.new("UICorner")
-    cardCorner.CornerRadius = UDim.new(0, 10)
-    cardCorner.Parent = card
-
-    local cardStroke = Instance.new("UIStroke")
-    cardStroke.Color = Color3.fromRGB(48, 34, 48)
-    cardStroke.Thickness = 1
-    cardStroke.Parent = card
-
-    local cardPad = Instance.new("UIPadding")
-    cardPad.PaddingTop = UDim.new(0, 10)
-    cardPad.PaddingBottom = UDim.new(0, 12)
-    cardPad.PaddingLeft = UDim.new(0, 12)
-    cardPad.PaddingRight = UDim.new(0, 12)
-    cardPad.Parent = card
-
-    local cardLayout = Instance.new("UIListLayout")
-    cardLayout.Padding = UDim.new(0, 8)
-    cardLayout.Parent = card
-
-    if title then
-        local header = Instance.new("TextLabel")
-        header.Size = UDim2.new(1, 0, 0, 18)
-        header.BackgroundTransparency = 1
-        header.Text = string.upper(title)
-        header.Font = Enum.Font.GothamBold
-        header.TextSize = 10
-        header.TextColor3 = SakuraTheme.AccentSoft
-        header.TextXAlignment = Enum.TextXAlignment.Left
-        header.Parent = card
-    end
-
-    return card
-end
-
--- Création d'un Toggle Switch
-local function addToggle(card, labelText, defaultVal, callbackKey)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 32)
-    row.BackgroundTransparency = 1
-    row.Parent = card
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -50, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = labelText
-    lbl.Font = Enum.Font.Gotham
-    lbl.TextSize = 11
-    lbl.TextColor3 = SakuraTheme.TextLight
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = row
-
-    local switch = Instance.new("TextButton")
-    switch.Size = UDim2.new(0, 42, 0, 22)
-    switch.Position = UDim2.new(1, -42, 0.5, -11)
-    switch.BackgroundColor3 = defaultVal and SakuraTheme.ToggleOn or SakuraTheme.ToggleOff
-    switch.Text = ""
-    switch.AutoButtonColor = false
-    switch.Parent = row
-
-    local switchCorner = Instance.new("UICorner")
-    switchCorner.CornerRadius = UDim.new(1, 0)
-    switchCorner.Parent = switch
-
-    local knob = Instance.new("Frame")
-    knob.Size = UDim2.new(0, 16, 0, 16)
-    knob.Position = defaultVal and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
-    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    knob.BorderSizePixel = 0
-    knob.Parent = switch
-
-    local knobCorner = Instance.new("UICorner")
-    knobCorner.CornerRadius = UDim.new(1, 0)
-    knobCorner.Parent = knob
-
-    local currentVal = defaultVal
-    switch.MouseButton1Click:Connect(function()
-        currentVal = not currentVal
-        SakuraConfig[callbackKey] = currentVal
-
-        if currentVal then
-            tween(switch, { BackgroundColor3 = SakuraTheme.ToggleOn }, 0.2)
-            tween(knob, { Position = UDim2.new(1, -19, 0.5, -8) }, 0.2)
-        else
-            tween(switch, { BackgroundColor3 = SakuraTheme.ToggleOff }, 0.2)
-            tween(knob, { Position = UDim2.new(0, 3, 0.5, -8) }, 0.2)
-        end
-
-        SakuraCallbacks.onToggle(callbackKey, currentVal)
-    end)
-
-    return row
-end
-
--- Création d'un Slider
-local function addSlider(card, labelText, minVal, maxVal, defaultVal, unit, callbackKey)
-    local container = Instance.new("Frame")
-    container.Size = UDim2.new(1, 0, 0, 44)
-    container.BackgroundTransparency = 1
-    container.Parent = card
-
-    local header = Instance.new("Frame")
-    header.Size = UDim2.new(1, 0, 0, 18)
-    header.BackgroundTransparency = 1
-    header.Parent = container
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -60, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = labelText
-    lbl.Font = Enum.Font.Gotham
-    lbl.TextSize = 11
-    lbl.TextColor3 = SakuraTheme.TextLight
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = header
-
-    local valLbl = Instance.new("TextLabel")
-    valLbl.Size = UDim2.new(0, 60, 1, 0)
-    valLbl.Position = UDim2.new(1, -60, 0, 0)
-    valLbl.BackgroundTransparency = 1
-    valLbl.Text = tostring(defaultVal) .. (unit or "")
-    valLbl.Font = Enum.Font.GothamBold
-    valLbl.TextSize = 11
-    valLbl.TextColor3 = SakuraTheme.AccentSoft
-    valLbl.TextXAlignment = Enum.TextXAlignment.Right
-    valLbl.Parent = header
-
-    local track = Instance.new("Frame")
-    track.Size = UDim2.new(1, 0, 0, 8)
-    track.Position = UDim2.new(0, 0, 0, 24)
-    track.BackgroundColor3 = SakuraTheme.CardSub
-    track.BorderSizePixel = 0
-    track.Parent = container
-
-    local trackCorner = Instance.new("UICorner")
-    trackCorner.CornerRadius = UDim.new(1, 0)
-    trackCorner.Parent = track
-
-    local fill = Instance.new("Frame")
-    local pctInit = math.clamp((defaultVal - minVal) / (maxVal - minVal), 0, 1)
-    fill.Size = UDim2.new(pctInit, 0, 1, 0)
-    fill.BackgroundColor3 = SakuraTheme.Accent
-    fill.BorderSizePixel = 0
-    fill.Parent = track
-
-    local fillCorner = Instance.new("UICorner")
-    fillCorner.CornerRadius = UDim.new(1, 0)
-    fillCorner.Parent = fill
-
-    local sliding = false
-    local function updateSlide(input)
-        local posX = input.Position.X - track.AbsolutePosition.X
-        local pct = math.clamp(posX / track.AbsoluteSize.X, 0, 1)
-        local value = math.floor(minVal + (maxVal - minVal) * pct)
-        fill.Size = UDim2.new(pct, 0, 1, 0)
-        valLbl.Text = tostring(value) .. (unit or "")
-        SakuraConfig[callbackKey] = value
-        SakuraCallbacks.onSlider(callbackKey, value)
-    end
-
-    track.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            sliding = true
-            updateSlide(input)
-        end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            sliding = false
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            updateSlide(input)
-        end
-    end)
-
-    return container
-end
-
--- Création d'un Bouton d'Action
-local function addButton(card, btnText, color, callbackKey)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 32)
-    btn.BackgroundColor3 = color or SakuraTheme.CardSub
-    btn.Text = btnText
+    btn.Size = UDim2.new(0.315, 0, 1, 0)
+    btn.BackgroundColor3 = Theme.Card
+    btn.Text = title
     btn.Font = Enum.Font.GothamSemibold
     btn.TextSize = 11
-    btn.TextColor3 = SakuraTheme.TextLight
-    btn.AutoButtonColor = true
-    btn.Parent = card
+    btn.TextColor3 = Theme.TextDim
+    btn.AutoButtonColor = false
+    btn.Parent = NavFrame
 
     local corner = Instance.new("UICorner")
     corner.CornerRadius = UDim.new(0, 8)
     corner.Parent = btn
 
     local stroke = Instance.new("UIStroke")
-    stroke.Color = SakuraTheme.Accent
+    stroke.Color = Theme.Accent
     stroke.Thickness = 0.8
+    stroke.Transparency = 0.6
     stroke.Parent = btn
 
+    Tabs[name] = page
+    TabButtons[name] = { Button = btn, Stroke = stroke }
+
     btn.MouseButton1Click:Connect(function()
-        tween(btn, { BackgroundColor3 = SakuraTheme.Accent }, 0.1):Play()
-        task.wait(0.12)
-        tween(btn, { BackgroundColor3 = color or SakuraTheme.CardSub }, 0.2):Play()
-        SakuraCallbacks.onAction(callbackKey)
+        for tName, p in pairs(Tabs) do
+            p.Visible = (tName == name)
+            local bData = TabButtons[tName]
+            if tName == name then
+                bData.Button.BackgroundColor3 = Theme.CardSub
+                bData.Button.TextColor3 = Theme.AccentSoft
+                bData.Stroke.Transparency = 0
+            else
+                bData.Button.BackgroundColor3 = Theme.Card
+                bData.Button.TextColor3 = Theme.TextDim
+                bData.Stroke.Transparency = 0.6
+            end
+        end
     end)
 
+    return page
+end
+
+local PageCash  = createTab("Cash", "💰 Auto-Collect Cash")
+local PageEggs  = createTab("Eggs", "🥚 Auto-Buy Œufs")
+local PageBoxes = createTab("Boxes", "📦 Auto-Buy Boîtes")
+
+-- Composant Carte
+local function makeCard(parent, headerTitle)
+    local c = Instance.new("Frame")
+    c.Size = UDim2.new(1, 0, 0, 0)
+    c.BackgroundColor3 = Theme.Card
+    c.AutomaticSize = Enum.AutomaticSize.Y
+    c.BorderSizePixel = 0
+    c.Parent = parent
+
+    local cc = Instance.new("UICorner")
+    cc.CornerRadius = UDim.new(0, 8)
+    cc.Parent = c
+
+    local cp = Instance.new("UIPadding")
+    cp.PaddingTop = UDim.new(0, 8)
+    cp.PaddingBottom = UDim.new(0, 8)
+    cp.PaddingLeft = UDim.new(0, 10)
+    cp.PaddingRight = UDim.new(0, 10)
+    cp.Parent = c
+
+    local cl = Instance.new("UIListLayout")
+    cl.Padding = UDim.new(0, 6)
+    cl.Parent = c
+
+    if headerTitle then
+        local hl = Instance.new("TextLabel")
+        hl.Size = UDim2.new(1, 0, 0, 16)
+        hl.BackgroundTransparency = 1
+        hl.Text = string.upper(headerTitle)
+        hl.Font = Enum.Font.GothamBold
+        hl.TextSize = 10
+        hl.TextColor3 = Theme.AccentSoft
+        hl.TextXAlignment = Enum.TextXAlignment.Left
+        hl.Parent = c
+    end
+    return c
+end
+
+-- Composant Toggle Switch
+local function makeToggle(card, text, defaultVal, onToggle)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 28)
+    row.BackgroundTransparency = 1
+    row.Parent = card
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -50, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 11
+    lbl.TextColor3 = Theme.Text
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = row
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 40, 0, 20)
+    btn.Position = UDim2.new(1, -40, 0.5, -10)
+    btn.BackgroundColor3 = defaultVal and Theme.Accent or Theme.CardSub
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.Parent = row
+
+    local bCorner = Instance.new("UICorner")
+    bCorner.CornerRadius = UDim.new(1, 0)
+    bCorner.Parent = btn
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 14, 0, 14)
+    knob.Position = defaultVal and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.Parent = btn
+
+    local kCorner = Instance.new("UICorner")
+    kCorner.CornerRadius = UDim.new(1, 0)
+    kCorner.Parent = knob
+
+    local current = defaultVal
+    btn.MouseButton1Click:Connect(function()
+        current = not current
+        if current then
+            btn.BackgroundColor3 = Theme.Accent
+            knob.Position = UDim2.new(1, -17, 0.5, -7)
+        else
+            btn.BackgroundColor3 = Theme.CardSub
+            knob.Position = UDim2.new(0, 3, 0.5, -7)
+        end
+        onToggle(current)
+    end)
+    return row
+end
+
+-- Composant Bouton d'Action
+local function makeButton(card, text, onClick)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 28)
+    btn.BackgroundColor3 = Theme.CardSub
+    btn.Text = text
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 11
+    btn.TextColor3 = Theme.Text
+    btn.Parent = card
+
+    local bCorner = Instance.new("UICorner")
+    bCorner.CornerRadius = UDim.new(0, 6)
+    bCorner.Parent = btn
+
+    local bStroke = Instance.new("UIStroke")
+    bStroke.Color = Theme.Accent
+    bStroke.Thickness = 0.8
+    bStroke.Parent = btn
+
+    btn.MouseButton1Click:Connect(function()
+        btn.BackgroundColor3 = Theme.Accent
+        task.wait(0.1)
+        btn.BackgroundColor3 = Theme.CardSub
+        onClick()
+    end)
     return btn
 end
 
 -- ========================================================================================
--- 📑 CONSTRUCTION DES PAGES & CATÉGORIES DEMANDÉES
+-- 📑 CONTENU ONGLET 1 : AUTO-COLLECT CASH
 -- ========================================================================================
+local CardStats = makeCard(PageCash, "Solde & Statistiques Directes")
+local CashDisplay = Instance.new("TextLabel")
+CashDisplay.Size = UDim2.new(1, 0, 0, 20)
+CashDisplay.BackgroundTransparency = 1
+CashDisplay.Font = Enum.Font.GothamBold
+CashDisplay.TextSize = 13
+CashDisplay.TextColor3 = Theme.Green
+CashDisplay.TextXAlignment = Enum.TextXAlignment.Left
+CashDisplay.Text = "💵 Cash Actuel : Chargement..."
+CashDisplay.Parent = CardStats
 
--- ----------------------------------------------------------------------------------------
--- PAGE 1 : 🌸 AUTO-FARM & FORCE
--- ----------------------------------------------------------------------------------------
-local FarmPage = createPage("Farm", "Auto-Farm", Icons.Farm)
+local StatusDisplay = Instance.new("TextLabel")
+StatusDisplay.Size = UDim2.new(1, 0, 0, 16)
+StatusDisplay.BackgroundTransparency = 1
+StatusDisplay.Font = Enum.Font.Gotham
+StatusDisplay.TextSize = 11
+StatusDisplay.TextColor3 = Theme.TextDim
+StatusDisplay.TextXAlignment = Enum.TextXAlignment.Left
+StatusDisplay.Text = "⏱️ État : Collecte automatique active"
+StatusDisplay.Parent = CardStats
 
-local TrainCard = createCard(FarmPage, "Entraînement de la Force")
-addToggle(TrainCard, "Auto Train (Entraînement continu)", SakuraConfig.AutoTrain, "AutoTrain")
-addSlider(TrainCard, "Vitesse de Clic (CPS)", 1, 30, SakuraConfig.TrainCPS, " CPS", "TrainCPS")
-addToggle(TrainCard, "Auto-Équiper Meilleur Haltère", SakuraConfig.AutoEquipBestTool, "AutoEquipBestTool")
+local CardCollect = makeCard(PageCash, "Paramètres de Récolte")
+makeToggle(CardCollect, "Activer Auto-Collect Cash en continu", Config.AutoCollectCash, function(val)
+    Config.AutoCollectCash = val
+    StatusDisplay.Text = val and "⏱️ État : Collecte automatique active" or "⏱️ État : En pause"
+    StatusDisplay.TextColor3 = val and Theme.Green or Theme.Red
+end)
 
-local CashCard = createCard(FarmPage, "Récolte & Tycoon")
-addToggle(CashCard, "Auto Collect Cash (Plots de base)", SakuraConfig.AutoCollectCash, "AutoCollectCash")
-addSlider(CashCard, "Intervalle de Collecte", 1, 10, SakuraConfig.CollectInterval, "s", "CollectInterval")
-addToggle(CashCard, "Upgrade All Fish (Amélioration des plots)", SakuraConfig.UpgradeAllFish, "UpgradeAllFish")
-addSlider(CashCard, "Réserve de Cash Sécurisée", 0, 50000, SakuraConfig.UpgradeReserveCash, "$", "UpgradeReserveCash")
+makeButton(CardCollect, "⚡ Récolter Tout Immédiatement (Force Collect)", function()
+    local ok = collectCashOnce()
+    StatusDisplay.Text = "✔ Récolté avec succès à " .. os.date("%X")
+    StatusDisplay.TextColor3 = Theme.Green
+end)
 
--- ----------------------------------------------------------------------------------------
--- PAGE 2 : 📦 BOÎTES & ŒUFS
--- ----------------------------------------------------------------------------------------
-local BoxesPage = createPage("Boxes", "Boîtes & Œufs", Icons.Boxes)
+-- ========================================================================================
+-- 📑 CONTENU ONGLET 2 : AUTO-BUY ŒUFS (MULTI-SÉLECTION)
+-- ========================================================================================
+local CardEggMaster = makeCard(PageEggs, "Activation Principale")
+makeToggle(CardEggMaster, "Activer Auto-Achat d'Œufs (Auto-Buy Eggs)", Config.AutoBuyEggs, function(val)
+    Config.AutoBuyEggs = val
+end)
 
-local HatchCard = createCard(BoxesPage, "Incubation & Ouverture")
-addToggle(HatchCard, "Auto Open Placed Boxes (Ouvrir boîtes posées)", SakuraConfig.AutoOpenBoxes, "AutoOpenBoxes")
-addToggle(HatchCard, "Auto Hatch Eggs (Éclosion dès que prêt)", SakuraConfig.AutoHatchEggs, "AutoHatchEggs")
-addToggle(HatchCard, "Auto Skip Timer (Passer le temps d'attente)", SakuraConfig.AutoSkipEggTimer, "AutoSkipEggTimer")
+local CardEggShop = makeCard(PageEggs, "Boutique d'Œufs en Direct (3 Emplacements)")
+local EggSlot1 = Instance.new("TextLabel")
+EggSlot1.Size = UDim2.new(1, 0, 0, 16)
+EggSlot1.BackgroundTransparency = 1
+EggSlot1.Font = Enum.Font.Gotham
+EggSlot1.TextSize = 11
+EggSlot1.TextColor3 = Theme.Text
+EggSlot1.TextXAlignment = Enum.TextXAlignment.Left
+EggSlot1.Text = "Slot 1 : ..."
+EggSlot1.Parent = CardEggShop
 
-local BuyCard = createCard(BoxesPage, "Achats Automatiques")
-addToggle(BuyCard, "Auto Buy Eggs (Acheter œufs du shop)", SakuraConfig.AutoBuyEggs, "AutoBuyEggs")
-addButton(BuyCard, "🥚 Type d'Œuf Actuel : ForestEgg", SakuraTheme.CardSub, "SelectEgg")
-addToggle(BuyCard, "Auto Buy Boxes (Acheter caisses flotteurs)", SakuraConfig.AutoBuyBoxes, "AutoBuyBoxes")
-addButton(BuyCard, "📦 Type de Boîte Actuel : CommonFloatCrate", SakuraTheme.CardSub, "SelectBox")
+local EggSlot2 = Instance.new("TextLabel")
+EggSlot2.Size = UDim2.new(1, 0, 0, 16)
+EggSlot2.BackgroundTransparency = 1
+EggSlot2.Font = Enum.Font.Gotham
+EggSlot2.TextSize = 11
+EggSlot2.TextColor3 = Theme.Text
+EggSlot2.TextXAlignment = Enum.TextXAlignment.Left
+EggSlot2.Text = "Slot 2 : ..."
+EggSlot2.Parent = CardEggShop
 
--- ----------------------------------------------------------------------------------------
--- PAGE 3 : 🐟 VENTE AVANCÉE
--- ----------------------------------------------------------------------------------------
-local SellPage = createPage("Sell", "Vente Avancée", Icons.Sell)
+local EggSlot3 = Instance.new("TextLabel")
+EggSlot3.Size = UDim2.new(1, 0, 0, 16)
+EggSlot3.BackgroundTransparency = 1
+EggSlot3.Font = Enum.Font.Gotham
+EggSlot3.TextSize = 11
+EggSlot3.TextColor3 = Theme.Text
+EggSlot3.TextXAlignment = Enum.TextXAlignment.Left
+EggSlot3.Text = "Slot 3 : ..."
+EggSlot3.Parent = CardEggShop
 
-local SellCard = createCard(SellPage, "Filtre Intelligent de Vente")
-addToggle(SellCard, "Auto Sell Master (Activer la vente)", SakuraConfig.AutoSellMaster, "AutoSellMaster")
-addToggle(SellCard, "🛡️ Protéger TOUTES les Mutations", SakuraConfig.KeepMutations, "KeepMutations")
-addSlider(SellCard, "Min Mutations pour Protection", 1, 4, SakuraConfig.MinMutationsToKeep, "", "MinMutationsToKeep")
-
-local RarityFilterCard = createCard(SellPage, "Raretés Autorisées à la Vente")
-for rName, enabled in pairs(SakuraConfig.SellRarities) do
-    addToggle(RarityFilterCard, "Vendre " .. rName, enabled, "SellRarity_" .. rName)
+local CardEggSelect = makeCard(PageEggs, "Sélectionnez les Œufs à Acheter (Multi-Choix)")
+local eggOptions = { "ForestEgg", "FarmEgg", "OceanEgg", "MythicEgg" }
+for _, eggName in ipairs(eggOptions) do
+    makeToggle(CardEggSelect, "Acheter " .. eggName, Config.SelectedEggs[eggName] or false, function(checked)
+        Config.SelectedEggs[eggName] = checked
+    end)
 end
 
-local PreviewCard = createCard(SellPage, "Vérification Compte Principal")
-addButton(PreviewCard, "🔍 Tester le Filtre (Dry-Run / 0 vente réelle)", SakuraTheme.CardSub, "TestSellFilter")
+makeButton(PageEggs, "🛒 Acheter les Œufs Ciblés Maintenant", function()
+    checkAndBuyEggs()
+end)
 
--- ----------------------------------------------------------------------------------------
--- PAGE 4 : 🧬 DNA LAB
--- ----------------------------------------------------------------------------------------
-local DnaPage = createPage("DNA", "DNA Lab", Icons.DNA)
+-- ========================================================================================
+-- 📑 CONTENU ONGLET 3 : AUTO-BUY BOÎTES (MULTI-SÉLECTION)
+-- ========================================================================================
+local CardBoxMaster = makeCard(PageBoxes, "Activation Principale")
+makeToggle(CardBoxMaster, "Activer Auto-Achat de Boîtes (Auto-Buy Boxes)", Config.AutoBuyBoxes, function(val)
+    Config.AutoBuyBoxes = val
+end)
 
-local DnaCard = createCard(DnaPage, "Broyeur Génétique (Grinder)")
-addToggle(DnaCard, "Auto Grind Fish for DNA (Broyer doublons)", SakuraConfig.AutoGrindDNA, "AutoGrindDNA")
-addToggle(DnaCard, "Broyer Poissons Common", true, "GrindCommon")
-addToggle(DnaCard, "Broyer Poissons Uncommon", true, "GrindUncommon")
+local CardBoxShop = makeCard(PageBoxes, "Boutique de Boîtes en Direct (3 Emplacements)")
+local BoxSlot1 = Instance.new("TextLabel")
+BoxSlot1.Size = UDim2.new(1, 0, 0, 16)
+BoxSlot1.BackgroundTransparency = 1
+BoxSlot1.Font = Enum.Font.Gotham
+BoxSlot1.TextSize = 11
+BoxSlot1.TextColor3 = Theme.Text
+BoxSlot1.TextXAlignment = Enum.TextXAlignment.Left
+BoxSlot1.Text = "Slot 1 : ..."
+BoxSlot1.Parent = CardBoxShop
 
-local ResearchCard = createCard(DnaPage, "Recherche & Récolte")
-addToggle(ResearchCard, "Auto Start DNA Research (Lancer cuves)", SakuraConfig.AutoStartResearch, "AutoStartResearch")
-addToggle(ResearchCard, "Auto Claim DNA Results (Récupérer)", SakuraConfig.AutoClaimDNA, "AutoClaimDNA")
+local BoxSlot2 = Instance.new("TextLabel")
+BoxSlot2.Size = UDim2.new(1, 0, 0, 16)
+BoxSlot2.BackgroundTransparency = 1
+BoxSlot2.Font = Enum.Font.Gotham
+BoxSlot2.TextSize = 11
+BoxSlot2.TextColor3 = Theme.Text
+BoxSlot2.TextXAlignment = Enum.TextXAlignment.Left
+BoxSlot2.Text = "Slot 2 : ..."
+BoxSlot2.Parent = CardBoxShop
 
--- ----------------------------------------------------------------------------------------
--- PAGE 5 : 📍 TÉLÉPORTATIONS
--- ----------------------------------------------------------------------------------------
-local TeleportPage = createPage("TP", "Téléportations", Icons.Teleport)
+local BoxSlot3 = Instance.new("TextLabel")
+BoxSlot3.Size = UDim2.new(1, 0, 0, 16)
+BoxSlot3.BackgroundTransparency = 1
+BoxSlot3.Font = Enum.Font.Gotham
+BoxSlot3.TextSize = 11
+BoxSlot3.TextColor3 = Theme.Text
+BoxSlot3.TextXAlignment = Enum.TextXAlignment.Left
+BoxSlot3.Text = "Slot 3 : ..."
+BoxSlot3.Parent = CardBoxShop
 
-local TpCard = createCard(TeleportPage, "Points d'Intérêt & Zones")
-addButton(TpCard, "🏠 TP Base Plot (Mon île)", SakuraTheme.CardSub, "TP_Base")
-addButton(TpCard, "🎣 TP Zone de Pêche (ThrowZone)", SakuraTheme.CardSub, "TP_ThrowZone")
-addButton(TpCard, "🏪 TP Shop Central (Vendeur)", SakuraTheme.CardSub, "TP_Shop")
-addButton(TpCard, "🏘️ TP Fishing Village (Quêtes & Marché)", SakuraTheme.CardSub, "TP_Village")
-addButton(TpCard, "🧬 TP DNA Lab & Grinder", SakuraTheme.CardSub, "TP_DnaLab")
-addButton(TpCard, "🤿 TP The Deeps (Abysses)", SakuraTheme.CardSub, "TP_Deeps")
-addButton(TpCard, "☢️ TP Silo & Réacteur Nucléaire", SakuraTheme.CardSub, "TP_Radioactive")
-addButton(TpCard, "🛸 TP Océan Alien", SakuraTheme.CardSub, "TP_Alien")
+local CardBoxSelect = makeCard(PageBoxes, "Sélectionnez les Boîtes à Acheter (Multi-Choix)")
+local boxOptions = {
+    "CommonFloatCrate", "RareFloatCrate", "EpicFloatCrate",
+    "LegendaryFloatCrate", "MythicFloatCrate", "CatFloatCrate", "FunctionalObjectsCrate"
+}
+for _, boxName in ipairs(boxOptions) do
+    makeToggle(CardBoxSelect, "Acheter " .. boxName, Config.SelectedBoxes[boxName] or false, function(checked)
+        Config.SelectedBoxes[boxName] = checked
+    end)
+end
 
--- ----------------------------------------------------------------------------------------
--- PAGE 6 : ⚙️ SÉCURITÉ & UTILITAIRES
--- ----------------------------------------------------------------------------------------
-local SettingsPage = createPage("Settings", "Utilitaires", Icons.Settings)
+makeButton(PageBoxes, "🛒 Acheter les Boîtes Ciblées Maintenant", function()
+    checkAndBuyBoxes()
+end)
 
-local SafetyCard = createCard(SettingsPage, "Sécurité Compte & Anti-AFK")
-addToggle(SafetyCard, "Anti-AFK (Doux, SANS autorejoin)", SakuraConfig.AntiAFK, "AntiAFK")
+-- ========================================================================================
+-- 🔄 RAFRAÎCHISSEMENT EN DIRECT DES STATISTIQUES & BOUTIQUES
+-- ========================================================================================
+task.spawn(function()
+    while _G.__SAKURA_LUCKYFISH == CURRENT_GEN do
+        pcall(function()
+            local s = getState()
+            local m = s.money or 0
+            CashDisplay.Text = "💵 Cash Actuel : " .. formatNumber(m)
 
--- Implémentation locale de l'anti-AFK sans autorejoin
-LocalPlayer.Idled:Connect(function()
-    if SakuraConfig.AntiAFK then
-        VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
-        task.wait(1)
-        VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+            -- Shop Œufs
+            local eItems = s.eggShopItems or {}
+            local eSold = s.eggShopSoldSlots or {}
+            EggSlot1.Text = string.format("Slot 1 : %s (%s)", eItems[1] or "Vide", eSold[1] and "Épuisé" or "Disponible")
+            EggSlot2.Text = string.format("Slot 2 : %s (%s)", eItems[2] or "Vide", eSold[2] and "Épuisé" or "Disponible")
+            EggSlot3.Text = string.format("Slot 3 : %s (%s)", eItems[3] or "Vide", eSold[3] and "Épuisé" or "Disponible")
+
+            -- Shop Boîtes
+            local bItems = s.lootboxShopItems or {}
+            local bSold = s.lootboxShopSoldSlots or {}
+            BoxSlot1.Text = string.format("Slot 1 : %s (%s)", bItems[1] or "Vide", bSold[1] and "Épuisé" or "Disponible")
+            BoxSlot2.Text = string.format("Slot 2 : %s (%s)", bItems[2] or "Vide", bSold[2] and "Épuisé" or "Disponible")
+            BoxSlot3.Text = string.format("Slot 3 : %s (%s)", bItems[3] or "Vide", bSold[3] and "Épuisé" or "Disponible")
+        end)
+        task.wait(1.5)
     end
 end)
 
-local PlayerModsCard = createCard(SettingsPage, "Mouvements du Joueur")
-addSlider(PlayerModsCard, "Vitesse de Course (WalkSpeed)", 16, 120, SakuraConfig.WalkSpeed, " studs", "WalkSpeed")
-addToggle(PlayerModsCard, "Noclip (Traverser les obstacles)", SakuraConfig.Noclip, "Noclip")
+-- Afficher l'onglet Cash par défaut
+Tabs["Cash"].Visible = true
+TabButtons["Cash"].Button.BackgroundColor3 = Theme.CardSub
+TabButtons["Cash"].Button.TextColor3 = Theme.AccentSoft
+TabButtons["Cash"].Stroke.Transparency = 0
 
--- Noclip loop
-RunService.Stepped:Connect(function()
-    if SakuraConfig.Noclip and LocalPlayer.Character then
-        for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
-            if part:IsA("BasePart") and part.CanCollide then
-                part.CanCollide = false
-            end
-        end
-    end
-end)
-
-local PerfCard = createCard(SettingsPage, "Performances & FPS")
-addToggle(PerfCard, "Masquer les Familiers (Boost FPS)", SakuraConfig.HidePets, "HidePets")
-addToggle(PerfCard, "Supprimer les Cinématiques", SakuraConfig.NoCutscenes, "NoCutscenes")
-
--- ========================================================================================
--- 🚀 ACTIVATION DU PREMIER ONGLET PAR DÉFAUT
--- ========================================================================================
-if Pages["Farm"] and TabButtons["Farm"] then
-    Pages["Farm"].Visible = true
-    local tb = TabButtons["Farm"]
-    tb.Button.BackgroundTransparency = 0
-    tb.Button.BackgroundColor3 = Color3.fromRGB(48, 30, 48)
-    tb.Icon.ImageColor3 = SakuraTheme.Accent
-    tb.Title.TextColor3 = SakuraTheme.TextLight
-end
-
-print("🌸 [SAKURA UI] Chargé avec succès pour Pull A Lucky Fish !")
+print("🌸 [SAKURA] Menu Auto-Collect & Multi-Buy chargé avec succès !")
