@@ -51,23 +51,26 @@ end
 local function fireRemote(remoteObj, ...)
     if not isRunning or not remoteObj then return false end
     local args = table.pack(...)
-    if typeof(remoteObj) == "table" then
-        if remoteObj.Fire then pcall(function() remoteObj:Fire(table.unpack(args, 1, args.n)) end) end
-        if remoteObj.fire then pcall(function() remoteObj:fire(table.unpack(args, 1, args.n)) end) end
-        if remoteObj.Call then
-            pcall(function()
-                task.spawn(function() remoteObj:Call(table.unpack(args, 1, args.n)):Await() end)
-            end)
+    pcall(function()
+        if typeof(remoteObj) == "table" then
+            if remoteObj.Fire then
+                remoteObj:Fire(table.unpack(args, 1, args.n))
+            elseif remoteObj.fire then
+                remoteObj:fire(table.unpack(args, 1, args.n))
+            elseif remoteObj.Call then
+                local p = remoteObj:Call(table.unpack(args, 1, args.n))
+                if typeof(p) == "table" and type(p.Await) == "function" then
+                    p:Await()
+                end
+            end
+        elseif typeof(remoteObj) == "Instance" then
+            if remoteObj:IsA("RemoteEvent") then
+                remoteObj:FireServer(table.unpack(args, 1, args.n))
+            elseif remoteObj:IsA("RemoteFunction") then
+                remoteObj:InvokeServer(table.unpack(args, 1, args.n))
+            end
         end
-    elseif typeof(remoteObj) == "Instance" then
-        if remoteObj:IsA("RemoteEvent") then
-            pcall(function() remoteObj:FireServer(table.unpack(args, 1, args.n)) end)
-        elseif remoteObj:IsA("RemoteFunction") then
-            pcall(function()
-                task.spawn(function() remoteObj:InvokeServer(table.unpack(args, 1, args.n)) end)
-            end)
-        end
-    end
+    end)
     return true
 end
 
@@ -101,56 +104,51 @@ local function teleportTo(cf)
     end
 end
 
-local Locations = {
-    IslandArrival = CFrame.new(2406.00, 20.25, -339.55),
-    CauldronStation = nil,
-    CauldronZone = nil,
-    ShopPedestals = nil
-}
+local CAULDRON_PIER_CF = CFrame.lookAt(Vector3.new(2410, 24, -380), Vector3.new(2402, 24, -470))
+local ISLAND_ARRIVAL_CF = CFrame.new(2406.00, 20.25, -339.55)
 
-local function resolveLocations()
-    local island = workspace:FindFirstChild("wyspa")
-    if island then
-        local stir = island:FindFirstChild("HalloweenStirStation")
-        if stir and stir:FindFirstChild("CauldronAnchor") then
-            Locations.CauldronStation = stir.CauldronAnchor.CFrame + Vector3.new(0, 3, 4)
+local function ensureAtCauldron()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local dist = (hrp.Position - CAULDRON_PIER_CF.Position).Magnitude
+    if dist > 35 then
+        if Remotes.HalloweenPortalUse then
+            fireRemote(Remotes.HalloweenPortalUse)
         end
-        local dive = island:FindFirstChild("CauldronDive")
-        if dive and dive:FindFirstChild("CauldronFishingZone") then
-            Locations.CauldronZone = dive.CauldronFishingZone.CFrame + Vector3.new(0, 4, 0)
-        end
+        hrp.CFrame = CAULDRON_PIER_CF
+        task.wait(0.3)
     end
-    local shop = workspace:FindFirstChild("Eventshop")
-    if shop and shop:FindFirstChild("pedestals") then
-        Locations.ShopPedestals = shop.pedestals:GetPivot() + Vector3.new(0, 3, 5)
-    end
-
-    if not Locations.CauldronStation then
-        for _, inst in ipairs(CollectionService:GetTagged("HalloweenStirCauldron")) do
-            local p = getPartCFrame(inst)
-            if p then Locations.CauldronStation = p + Vector3.new(0, 3, 4) break end
-        end
-    end
-    if not Locations.CauldronZone then
-        for _, inst in ipairs(CollectionService:GetTagged("CauldronFishingZone")) do
-            local p = getPartCFrame(inst)
-            if p then Locations.CauldronZone = p + Vector3.new(0, 4, 0) break end
-        end
-    end
-    if not Locations.ShopPedestals then
-        for _, inst in ipairs(CollectionService:GetTagged("HalloweenEventShopPedestals")) do
-            local p = getPartCFrame(inst)
-            if p then Locations.ShopPedestals = p + Vector3.new(0, 3, 5) break end
-        end
-    end
+    return true
 end
 
-resolveLocations()
+local function equipFishingRod()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return nil end
+
+    local currentTool = char:FindFirstChildOfClass("Tool")
+    if currentTool and (currentTool.Name:find("Rod") or currentTool.Name:find("Fish") or currentTool.Name:find("FISHROD")) then
+        return currentTool
+    end
+
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if backpack then
+        for _, tool in ipairs(backpack:GetChildren()) do
+            if tool:IsA("Tool") and (tool.Name:find("Rod") or tool.Name:find("Fish") or tool.Name:find("FISHROD")) then
+                humanoid:EquipTool(tool)
+                task.wait(0.15)
+                return tool
+            end
+        end
+    end
+    return nil
+end
 
 local Config = {
     AutoFish = true,
     AutoStir = true,
-    AutoTeleport = false,
     AutoUpgrade = true,
     SelectedUpgrades = {
         Capacity = true,
@@ -169,6 +167,21 @@ local Config = {
     AntiAfk = true
 }
 
+local function isSelected(container, key)
+    if not container then return false end
+    if type(container) == "table" then
+        if container[key] == true then return true end
+        for k, v in pairs(container) do
+            if v == key or k == key or (type(v) == "string" and v:lower() == key:lower()) then
+                return true
+            end
+        end
+    elseif type(container) == "string" then
+        return container:lower() == key:lower()
+    end
+    return false
+end
+
 local function formatKMB(n)
     n = tonumber(n) or 0
     if n >= 1000000000 then return string.format("%.2fB", n / 1000000000) end
@@ -180,7 +193,13 @@ end
 local function getHalloweenData()
     local s = getState()
     local ev = s.events and s.events.HalloweenEvent_2026_10 or {}
-    local coins = tonumber(ev.coins) or 0
+    local coins = tonumber(ev.coins)
+    if not coins then
+        for _, k in ipairs({"halloweenCoins", "candies", "eventCoins", "coins"}) do
+            if s[k] and tonumber(s[k]) then coins = tonumber(s[k]) break end
+        end
+    end
+    coins = coins or 0
     local bobberWeight = tonumber(ev.bobberWeight) or 0
     local stats = ev.cauldronStats or {}
     local casts = tonumber(stats.casts) or 0
@@ -201,32 +220,21 @@ local function getHalloweenData()
         machine = machine,
         capacity = capacity,
         luck = luck,
-        heavier = heavier
+        heavier = heavier,
+        rawUpgrades = upgrades
     }
 end
 
 local isStirring = false
 
-local function autoStirCauldron()
-    if not Config.AutoStir then
-        if isStirring then
-            isStirring = false
-            if Remotes.HalloweenStirStop then fireRemote(Remotes.HalloweenStirStop) end
-        end
-        return
-    end
-
+local function performStir()
     local data = getHalloweenData()
     if data.bobberWeight >= 617190 then
         if isStirring then
             isStirring = false
             if Remotes.HalloweenStirStop then fireRemote(Remotes.HalloweenStirStop) end
         end
-        return
-    end
-
-    if Config.AutoTeleport and Locations.CauldronStation then
-        teleportTo(Locations.CauldronStation)
+        return false
     end
 
     if Remotes.HalloweenStirStart then
@@ -240,13 +248,14 @@ local function autoStirCauldron()
             triggerPrompt(prompt)
         end
     end
+    return true
 end
 
-local function autoFishEvent()
-    if not Config.AutoFish then return end
-
-    if Config.AutoTeleport and Locations.CauldronZone then
-        teleportTo(Locations.CauldronZone)
+local function performFish()
+    ensureAtCauldron()
+    local tool = equipFishingRod()
+    if tool then
+        pcall(function() tool:Activate() end)
     end
 
     if Remotes.FishingCastBegin then fireRemote(Remotes.FishingCastBegin) end
@@ -254,12 +263,15 @@ local function autoFishEvent()
     if Remotes.FishingRemoteStage then fireRemote(Remotes.FishingRemoteStage, 1, true) end
     if Remotes.FishingStage then fireRemote(Remotes.FishingStage, 1, true) end
 
-    if Remotes.CauldronDiveStart then
-        fireRemote(Remotes.CauldronDiveStart)
-    end
+    if Remotes.CauldronDiveStart then fireRemote(Remotes.CauldronDiveStart) end
+    if Remotes.CauldronDiveFinish then fireRemote(Remotes.CauldronDiveFinish) end
 
-    if Remotes.CauldronDiveFinish then
-        fireRemote(Remotes.CauldronDiveFinish)
+    if VirtualUser then
+        pcall(function()
+            VirtualUser:Button1Down(Vector2.new(500, 500))
+            task.wait(0.04)
+            VirtualUser:Button1Up(Vector2.new(500, 500))
+        end)
     end
 end
 
@@ -282,26 +294,41 @@ local UPGRADE_DATA = {
     }
 }
 
-local function autoBuyUpgrades()
-    if not Config.AutoUpgrade or not Remotes.HalloweenBuyUpgrade then return end
-    local selected = Config.SelectedUpgrades or {}
+local function performUpgrade(upId)
+    if Remotes.HalloweenBuyUpgrade then
+        fireRemote(Remotes.HalloweenBuyUpgrade, upId)
+    end
+    local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local mainUI = pGui and pGui:FindFirstChild("MainUI")
+    local eventUpgradesUI = mainUI and mainUI:FindFirstChild("EventUpgrades")
+    if eventUpgradesUI then
+        for _, desc in ipairs(eventUpgradesUI:GetDescendants()) do
+            if desc:IsA("GuiButton") and desc.Name:lower():find(upId:lower()) then
+                pcall(function()
+                    if firesignal then firesignal(desc.MouseButton1Click) end
+                end)
+            end
+        end
+    end
+end
+
+local function performUpgradesPass(selected)
     local data = getHalloweenData()
     local coins = data.coins
     local order = { "Capacity", "Machine", "Luck", "HeavierFish" }
 
     for _, upId in ipairs(order) do
-        local isChosen = (selected[upId] == true)
-        if isChosen then
+        if isSelected(selected, upId) then
             local info = UPGRADE_DATA[upId]
             if info then
-                local currentStage = data[upId:lower()] or (upId == "Machine" and data.machine or 0)
+                local currentStage = data[upId:lower()] or (data.rawUpgrades and tonumber(data.rawUpgrades[upId])) or 0
                 if upId == "Machine" then currentStage = math.max(1, currentStage) - 1 end
                 if currentStage < info.Max then
                     local nextCost = info.Costs[currentStage + 1]
                     if nextCost and coins >= nextCost then
-                        fireRemote(Remotes.HalloweenBuyUpgrade, upId)
+                        performUpgrade(upId)
                         coins = coins - nextCost
-                        task.wait(0.1)
+                        task.wait(0.12)
                     end
                 end
             end
@@ -310,24 +337,25 @@ local function autoBuyUpgrades()
 end
 
 local SHOP_ITEMS = {
-    { Key = "HalloweenEggA", Price = 25000 },
-    { Key = "HalloweenEggB", Price = 75000 },
-    { Key = "HalloweenBase", Price = 1500000 },
-    { Key = "HalloweenMount", Price = 4000000 },
-    { Key = "HalloweenRod", Price = 15000000 }
+    { Key = "HalloweenEggA", Name = "HalloweenEgg_Spooky", Pedestal = 3, Price = 25000 },
+    { Key = "HalloweenEggB", Name = "HalloweenEgg_Cursed", Pedestal = 3, Price = 75000 },
+    { Key = "HalloweenBase", Name = "BaseHalloween",        Pedestal = 4, Price = 1500000 },
+    { Key = "HalloweenMount", Name = "MOUNT_WitchBroom",    Pedestal = 1, Price = 4000000 },
+    { Key = "HalloweenRod", Name = "FISHROD_DeathScythe",   Pedestal = 2, Price = 15000000 }
 }
 
-local function autoBuyShop()
-    if not Config.AutoBuy or not Remotes.BuyHalloweenShopItem then return end
-    local selected = Config.SelectedShopItems or {}
+local function performShopPass(selected)
     local data = getHalloweenData()
     local coins = data.coins
 
     for _, item in ipairs(SHOP_ITEMS) do
-        local isChosen = (selected[item.Key] == true)
-        if isChosen and coins >= item.Price then
-            fireRemote(Remotes.BuyHalloweenShopItem, item.Key)
-            task.wait(0.1)
+        if isSelected(selected, item.Key) and coins >= item.Price then
+            if Remotes.BuyHalloweenShopItem then
+                fireRemote(Remotes.BuyHalloweenShopItem, item.Key)
+                fireRemote(Remotes.BuyHalloweenShopItem, item.Name)
+                fireRemote(Remotes.BuyHalloweenShopItem, item.Pedestal)
+            end
+            task.wait(0.12)
         end
     end
 
@@ -337,8 +365,7 @@ local function autoBuyShop()
                 local act = desc.ActionText:lower()
                 local obj = desc.ObjectText:lower()
                 for _, item in ipairs(SHOP_ITEMS) do
-                    local isChosen = (selected[item.Key] == true)
-                    if isChosen and (act:find(item.Key:lower()) or obj:find(item.Key:lower())) then
+                    if isSelected(selected, item.Key) and (act:find(item.Key:lower()) or obj:find(item.Key:lower())) then
                         triggerPrompt(desc)
                     end
                 end
@@ -347,8 +374,74 @@ local function autoBuyShop()
     end
 end
 
+local autoFishToggle, autoStirToggle, autoUpgradeToggle, upgradesDropdown, autoBuyToggle, shopDropdown, antiAfkToggle
+local CoinsStatus, WeightStatus
+
+local function isFeatureEnabled(toggleObj, defaultKey)
+    if toggleObj and toggleObj.GetValue then
+        local v = toggleObj:GetValue()
+        if v ~= nil then return v == true end
+    end
+    return Config[defaultKey] == true
+end
+
+local function getActiveSelection(dropdownObj, defaultKey)
+    if dropdownObj and dropdownObj.GetValue then
+        local v = dropdownObj:GetValue()
+        if v ~= nil then return v end
+    end
+    return Config[defaultKey]
+end
+
+task.spawn(function()
+    while isRunning and _G.__HALLOWEEN_FARM == CURRENT_SESSION do
+        if isFeatureEnabled(autoFishToggle, "AutoFish") then
+            if isFeatureEnabled(autoStirToggle, "AutoStir") then
+                pcall(performStir)
+            end
+            pcall(performFish)
+        end
+        task.wait(0.35)
+    end
+end)
+
+task.spawn(function()
+    while isRunning and _G.__HALLOWEEN_FARM == CURRENT_SESSION do
+        if isFeatureEnabled(autoUpgradeToggle, "AutoUpgrade") then
+            local sel = getActiveSelection(upgradesDropdown, "SelectedUpgrades")
+            pcall(function() performUpgradesPass(sel) end)
+        end
+        task.wait(1.0)
+    end
+end)
+
+task.spawn(function()
+    while isRunning and _G.__HALLOWEEN_FARM == CURRENT_SESSION do
+        if isFeatureEnabled(autoBuyToggle, "AutoBuy") then
+            local sel = getActiveSelection(shopDropdown, "SelectedShopItems")
+            pcall(function() performShopPass(sel) end)
+        end
+        task.wait(1.2)
+    end
+end)
+
+task.spawn(function()
+    while isRunning and _G.__HALLOWEEN_FARM == CURRENT_SESSION do
+        pcall(function()
+            local d = getHalloweenData()
+            if CoinsStatus and CoinsStatus.SetValue then
+                CoinsStatus:SetValue(formatKMB(d.coins))
+            end
+            if WeightStatus and WeightStatus.SetValue then
+                WeightStatus:SetValue(string.format("%s / 617.2K", formatKMB(d.bobberWeight)))
+            end
+        end)
+        task.wait(1.5)
+    end
+end)
+
 table.insert(connections, LocalPlayer.Idled:Connect(function()
-    if Config.AntiAfk and VirtualUser then
+    if isFeatureEnabled(antiAfkToggle, "AntiAfk") and VirtualUser then
         pcall(function()
             VirtualUser:CaptureController()
             VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
@@ -360,11 +453,15 @@ end))
 
 task.spawn(function()
     while isRunning and _G.__HALLOWEEN_FARM == CURRENT_SESSION do
-        if Config.AutoStir then pcall(autoStirCauldron) end
-        if Config.AutoFish then pcall(autoFishEvent) end
-        if Config.AutoUpgrade then pcall(autoBuyUpgrades) end
-        if Config.AutoBuy then pcall(autoBuyShop) end
-        task.wait(0.25)
+        if isFeatureEnabled(antiAfkToggle, "AntiAfk") and VirtualUser then
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+                task.wait(0.2)
+                VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+            end)
+        end
+        task.wait(60)
     end
 end)
 
@@ -376,58 +473,47 @@ if not okBoblo or not BobloUI then
 end
 
 UI = BobloUI:CreateWindow({
-    Id = "pullaluckyfish-halloween",
+    Id = "luckyfish-halloween-hub",
     Title = "Pull A Lucky Fish — Halloween",
     Icon = "flame",
     Theme = "Dark",
-    Accent = Color3.fromHex("#FF7700"),
-    FooterText = "Halloween Event Hub",
-    ConfigFolder = "LuckyFish_Halloween",
-    AutoLoad = true
+    Accent = Color3.fromHex("#FF7700")
 })
 
 local MainTab = UI:AddTab({ Id = "main", Title = "Halloween Farm", Icon = "sparkles" })
 
 local FishSection = MainTab:AddSection({ Title = "Auto Fish", Icon = "fish" })
 
-FishSection:AddToggle({
+autoFishToggle = FishSection:AddToggle({
     Id = "AutoFish",
     Title = "Auto Fish Event",
-    Description = "Automatically cast and dive into the cauldron",
+    Description = "Teleports to cauldron, casts rod & dives for fish and candies",
     Default = true,
     Callback = function(val) Config.AutoFish = val end
 })
 
-FishSection:AddToggle({
+autoStirToggle = FishSection:AddToggle({
     Id = "AutoStir",
     Title = "Auto Stir Cauldron",
-    Description = "Stir cauldron to raise float weight (max 617K kg)",
+    Description = "Stir cauldron to raise float weight up to 617K kg max depth",
     Default = true,
     Callback = function(val) Config.AutoStir = val end
 })
 
-FishSection:AddToggle({
-    Id = "AutoTeleport",
-    Title = "Auto Teleport to Event",
-    Description = "Position character at cauldron station / zone",
-    Default = false,
-    Callback = function(val) Config.AutoTeleport = val end
-})
-
 local UpgradeSection = MainTab:AddSection({ Title = "Auto Upgrade", Icon = "zap" })
 
-UpgradeSection:AddToggle({
+autoUpgradeToggle = UpgradeSection:AddToggle({
     Id = "AutoUpgrade",
     Title = "Enable Auto Upgrade",
-    Description = "Automatically purchase chosen upgrades when affordable",
+    Description = "Automatically purchases chosen upgrades when coins allow",
     Default = true,
     Callback = function(val) Config.AutoUpgrade = val end
 })
 
-UpgradeSection:AddDropdown({
+upgradesDropdown = UpgradeSection:AddDropdown({
     Id = "SelectedUpgrades",
     Title = "Choose Upgrades",
-    Description = "Select which upgrades to auto-buy",
+    Description = "Select which upgrades to auto-purchase",
     Multi = true,
     Values = {
         Capacity = "Float Capacity",
@@ -450,18 +536,18 @@ UpgradeSection:AddDropdown({
 
 local ShopSection = MainTab:AddSection({ Title = "Auto Buy", Icon = "shopping-bag" })
 
-ShopSection:AddToggle({
+autoBuyToggle = ShopSection:AddToggle({
     Id = "AutoBuy",
     Title = "Enable Auto Buy",
-    Description = "Automatically buy chosen shop items from pedestals",
+    Description = "Automatically purchases chosen items from Halloween shop",
     Default = false,
     Callback = function(val) Config.AutoBuy = val end
 })
 
-ShopSection:AddDropdown({
+shopDropdown = ShopSection:AddDropdown({
     Id = "SelectedShopItems",
     Title = "Choose Shop Items",
-    Description = "Select which items to auto-buy from Halloween shop",
+    Description = "Select which items to auto-purchase from shop pedestals",
     Multi = true,
     Values = {
         HalloweenEggA = "Spooky Egg (25K)",
@@ -484,9 +570,9 @@ ShopSection:AddDropdown({
     end
 })
 
-local SettingsSection = MainTab:AddSection({ Title = "Settings & Status", Icon = "shield" })
+local MiscSection = MainTab:AddSection({ Title = "Utilities", Icon = "shield" })
 
-SettingsSection:AddToggle({
+antiAfkToggle = MiscSection:AddToggle({
     Id = "AntiAfk",
     Title = "Anti-AFK",
     Description = "Prevents 20-minute idle disconnect",
@@ -494,52 +580,28 @@ SettingsSection:AddToggle({
     Callback = function(val) Config.AntiAfk = val end
 })
 
-local CoinsStatus = SettingsSection:AddStatus({
+CoinsStatus = MiscSection:AddStatus({
     Id = "CoinsStatus",
     Title = "Halloween Coins",
     Value = "0"
 })
 
-local WeightStatus = SettingsSection:AddStatus({
+WeightStatus = MiscSection:AddStatus({
     Id = "WeightStatus",
     Title = "Bobber Weight",
     Value = "0 / 617.2K"
 })
 
-local DivesStatus = SettingsSection:AddStatus({
-    Id = "DivesStatus",
-    Title = "Cauldron Stats",
-    Value = "0 Dives | 0 Fish"
-})
-
-SettingsSection:AddButton({
+MiscSection:AddButton({
     Title = "Teleport to Halloween Island",
     Callback = function()
-        teleportTo(Locations.IslandArrival)
+        teleportTo(ISLAND_ARRIVAL_CF)
     end
 })
 
-SettingsSection:AddButton({
+MiscSection:AddButton({
     Title = "Unload Script",
     Callback = function()
         cleanShutdown()
     end
 })
-
-task.spawn(function()
-    while isRunning and _G.__HALLOWEEN_FARM == CURRENT_SESSION do
-        pcall(function()
-            local d = getHalloweenData()
-            if CoinsStatus and CoinsStatus.SetValue then
-                CoinsStatus:SetValue(formatKMB(d.coins))
-            end
-            if WeightStatus and WeightStatus.SetValue then
-                WeightStatus:SetValue(string.format("%s / 617.2K", formatKMB(d.bobberWeight)))
-            end
-            if DivesStatus and DivesStatus.SetValue then
-                DivesStatus:SetValue(string.format("%d Dives | %d Fish | %dm", d.casts, d.fish, d.maxDepth))
-            end
-        end)
-        task.wait(1.5)
-    end
-end)
