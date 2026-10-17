@@ -1,8 +1,20 @@
+--[[
+    🌸 SAKURA • Pull A Lucky Fish — v2 (réécriture complète)
+
+    Principes de cette version :
+      • Aucun appel bloquant : chaque remote est appelé avec un timeout, chaque fonctionnalité
+        tourne dans sa propre boucle (une fonction qui plante ne bloque plus les autres).
+      • Plus de spam de variantes : le script teste les formats d'arguments UNE fois, vérifie le
+        résultat dans l'état du jeu (argent, stock, items placés…) puis mémorise la variante qui marche.
+      • Plus de GetDescendants() sur tout le workspace (source principale des lags).
+      • Les timers sont lus d'abord dans l'UI du jeu (LootboxTimer_<id>), puis déduits des données.
+      • Onglet Logs + bouton Diagnostic (console F9) pour affiner si une variante n'est pas trouvée.
+]]
+
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local HttpService = game:GetService("HttpService")
 local CollectionService = game:GetService("CollectionService")
@@ -12,1453 +24,1432 @@ if not LocalPlayer then
     Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
     LocalPlayer = Players.LocalPlayer
 end
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-_G.__SAKURA_MAIN = (_G.__SAKURA_MAIN or 0) + 1
-local CURRENT_SESSION = _G.__SAKURA_MAIN
+---------------------------------------------------------------------
+-- Session (une seule instance à la fois)
+---------------------------------------------------------------------
+local ENV = (getgenv and getgenv()) or _G
+if type(ENV.__SAKURA_SHUTDOWN) == "function" then
+    pcall(ENV.__SAKURA_SHUTDOWN)
+end
+ENV.__SAKURA_SESSION = (ENV.__SAKURA_SESSION or 0) + 1
+local SESSION = ENV.__SAKURA_SESSION
+local GUI_NAME = "SakuraLuckyFish_Main"
 
-local isRunning = true
+local running = true
 local connections = {}
+local ScreenGui
 
-local function cleanShutdown()
-    if not isRunning then return end
-    isRunning = false
-    _G.__SAKURA_MAIN = (_G.__SAKURA_MAIN or 0) + 1
-    for _, conn in ipairs(connections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    table.clear(connections)
-    local targetParent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
-    local oldGui = targetParent and targetParent:FindFirstChild("SakuraLuckyFish_Main")
-    if oldGui then
-        oldGui:Destroy()
-    end
+local function track(conn)
+    connections[#connections + 1] = conn
+    return conn
 end
 
-local Shared = ReplicatedStorage:WaitForChild("shared", 10)
-local Client = ReplicatedStorage:WaitForChild("client", 10)
-if not Shared or not Client then return end
+local function alive()
+    return running and ENV.__SAKURA_SESSION == SESSION
+end
 
-local Remotes = require(Shared:WaitForChild("Remotes", 10))
-local CPD = require(Client:WaitForChild("ClientPlayerData", 10))
+local function shutdown()
+    if not running then return end
+    running = false
+    for _, c in ipairs(connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    table.clear(connections)
+    if ScreenGui then pcall(function() ScreenGui:Destroy() end) end
+end
+ENV.__SAKURA_SHUTDOWN = shutdown
+
+local function guiRoot()
+    local ok, root = pcall(function() return gethui and gethui() end)
+    if ok and root then return root end
+    return PlayerGui
+end
+
+for _, root in ipairs({ guiRoot(), PlayerGui }) do
+    local old = root:FindFirstChild(GUI_NAME)
+    if old then pcall(function() old:Destroy() end) end
+end
+
+---------------------------------------------------------------------
+-- Logs
+---------------------------------------------------------------------
+local logLines, onLog = {}, nil
+local function log(...)
+    local parts = table.pack(...)
+    for i = 1, parts.n do parts[i] = tostring(parts[i]) end
+    local line = os.date("%H:%M:%S") .. "  " .. table.concat(parts, " ")
+    print("[Sakura] " .. line)
+    logLines[#logLines + 1] = line
+    if #logLines > 80 then table.remove(logLines, 1) end
+    if onLog then pcall(onLog) end
+end
+
+---------------------------------------------------------------------
+-- Configuration persistante
+---------------------------------------------------------------------
+local CONFIG_FILE = "PullALuckyFish_Config.json"
+local DEFAULTS = {
+    AutoCollectCash = false,
+    AutoBuyEggs = false,
+    AutoBuyBoxes = false,
+    AutoBuyDecoCrate = false,
+    AutoBuyAuction = false,
+    AutoPlace = false,
+    AutoOpen = false,
+    AntiAFK = false,
+    AllowTeleport = true,
+    OpenPriority = "HighTierFirst",
+    CollectInterval = 5,
+    Learned = {},
+    Modes = {},
+}
+
+local Config = {}
+for k, v in pairs(DEFAULTS) do Config[k] = v end
+
+local function saveSettings()
+    pcall(function()
+        if writefile then writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end
+    end)
+end
+
+pcall(function()
+    if isfile and readfile and isfile(CONFIG_FILE) then
+        local data = HttpService:JSONDecode(readfile(CONFIG_FILE))
+        if type(data) == "table" then
+            for k, v in pairs(DEFAULTS) do
+                if data[k] ~= nil and type(data[k]) == type(v) then Config[k] = data[k] end
+            end
+        end
+    end
+end)
+
+local Learned = Config.Learned     -- clé -> index de la variante d'arguments validée
+local remoteMode = Config.Modes    -- nom du remote -> "call" | "fire"
+
+---------------------------------------------------------------------
+-- Modules du jeu
+---------------------------------------------------------------------
+local Shared = ReplicatedStorage:WaitForChild("shared", 15)
+local ClientFolder = ReplicatedStorage:WaitForChild("client", 15)
+if not (Shared and ClientFolder) then
+    warn("[Sakura] ReplicatedStorage.shared / client introuvables — mauvais jeu ?")
+    return
+end
+
+local okR, Remotes = pcall(function() return require(Shared:WaitForChild("Remotes", 15)) end)
+local okC, CPD = pcall(function() return require(ClientFolder:WaitForChild("ClientPlayerData", 15)) end)
+if not (okR and okC and Remotes and CPD) then
+    warn("[Sakura] Impossible de charger Remotes / ClientPlayerData")
+    return
+end
+
+do
+    local t0 = os.clock()
+    while alive() and not CPD.isPlayerDataLoaded and os.clock() - t0 < 30 do task.wait(0.25) end
+end
 
 local function getState()
-    if CPD and CPD.serverProfile and CPD.serverProfile.getState then
-        local ok, s = pcall(function() return CPD.serverProfile:getState() end)
-        if ok and type(s) == "table" then return s end
+    local sources = { CPD.serverProfile, CPD.clientProducer }
+    for _, src in ipairs(sources) do
+        if type(src) == "table" and type(src.getState) == "function" then
+            local ok, s = pcall(src.getState, src)
+            if ok and type(s) == "table" and s.money ~= nil then return s end
+        end
     end
-    if CPD and CPD.getState then
-        local ok, s = pcall(function() return CPD:getState() end)
+    if type(CPD.getState) == "function" then
+        local ok, s = pcall(CPD.getState, CPD)
         if ok and type(s) == "table" then return s end
     end
     return {}
 end
 
-local function fireRemote(remoteObj, ...)
-    if not isRunning or not remoteObj then return false end
-    local args = table.pack(...)
-    if typeof(remoteObj) == "table" then
-        if remoteObj.Fire then pcall(function() remoteObj:Fire(table.unpack(args, 1, args.n)) end) end
-        if remoteObj.fire then pcall(function() remoteObj:fire(table.unpack(args, 1, args.n)) end) end
-        if remoteObj.Call then
-            pcall(function()
-                task.spawn(function() remoteObj:Call(table.unpack(args, 1, args.n)):Await() end)
-            end)
-        end
-    elseif typeof(remoteObj) == "Instance" then
-        if remoteObj:IsA("RemoteEvent") then
-            pcall(function() remoteObj:FireServer(table.unpack(args, 1, args.n)) end)
-        elseif remoteObj:IsA("RemoteFunction") then
-            pcall(function()
-                task.spawn(function() remoteObj:InvokeServer(table.unpack(args, 1, args.n)) end)
-            end)
-        end
+local configCache = {}
+local function loadConfig(name)
+    if configCache[name] == nil then
+        local ok, mod = pcall(function()
+            return require(Shared:WaitForChild("config", 5):WaitForChild(name, 5))
+        end)
+        configCache[name] = (ok and mod) or false
     end
-    return true
+    return configCache[name] or nil
 end
 
+---------------------------------------------------------------------
+-- Utilitaires
+---------------------------------------------------------------------
 local SUFFIXES = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc" }
 local function formatNumber(n)
     n = tonumber(n) or 0
-    if n < 1000 then return tostring(math.floor(n)) end
+    if n ~= n then return "NaN" end
+    if math.abs(n) < 1000 then return tostring(math.floor(n)) end
     local i = 1
-    while n >= 1000 and i < #SUFFIXES do
+    while math.abs(n) >= 1000 and i < #SUFFIXES do
         n = n / 1000
-        i = i + 1
+        i += 1
     end
+    if math.abs(n) >= 1000 then return string.format("%.2e", n * 1000 ^ (i - 1)) end
     return string.format("%.2f %s", n, SUFFIXES[i])
 end
 
-local Config = {
-    AutoCollectCash = false,
-    AutoBuyEggs = false,
-    AutoBuyBoxes = false,
-    AutoBuyAuctionHouse = false,
-    AutoPlace = false,
-    AutoOpen = false,
-    AntiAFK = false,
-    OpenPriority = "HighTierFirst"
-}
-
-local CONFIG_FILE = "PullALuckyFish_Config.json"
-
-local function saveSettings()
-    pcall(function()
-        if writefile then
-            local payload = {
-                AutoCollectCash = Config.AutoCollectCash,
-                AutoBuyEggs = Config.AutoBuyEggs,
-                AutoBuyBoxes = Config.AutoBuyBoxes,
-                AutoBuyAuctionHouse = Config.AutoBuyAuctionHouse,
-                AutoPlace = Config.AutoPlace,
-                AutoOpen = Config.AutoOpen,
-                AntiAFK = Config.AntiAFK,
-                OpenPriority = Config.OpenPriority
-            }
-            writefile(CONFIG_FILE, HttpService:JSONEncode(payload))
-        end
-    end)
+local function countKeys(t)
+    local n = 0
+    if type(t) == "table" then for _ in pairs(t) do n += 1 end end
+    return n
 end
 
-local function loadSettings()
-    pcall(function()
-        if isfile and readfile and isfile(CONFIG_FILE) then
-            local raw = readfile(CONFIG_FILE)
-            if raw and #raw > 0 then
-                local data = HttpService:JSONDecode(raw)
-                if type(data) == "table" then
-                    for k, _ in pairs(Config) do
-                        if data[k] ~= nil and type(Config[k]) == type(data[k]) then
-                            Config[k] = data[k]
-                        end
-                    end
-                end
-            end
-        end
-    end)
+local function at(t, i)
+    if type(t) ~= "table" then return nil end
+    local v = t[i]
+    if v == nil then v = t[tostring(i)] end
+    return v
 end
 
-loadSettings()
+local function deepSig(v, depth)
+    depth = depth or 3
+    if type(v) ~= "table" then return tostring(v) end
+    if depth <= 0 then return "{…}" end
+    local keys = {}
+    for k in pairs(v) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    local parts = {}
+    for _, k in ipairs(keys) do parts[#parts + 1] = tostring(k) .. "=" .. deepSig(v[k], depth - 1) end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+local function stackOf(s, name)
+    local it = (s.inventory or {})[name]
+    return type(it) == "table" and (tonumber(it.Stack) or 0) or 0
+end
+
+local function totalStacks(s)
+    local n = 0
+    for _, it in pairs(s.inventory or {}) do
+        if type(it) == "table" then n += tonumber(it.Stack) or 0 end
+    end
+    return n
+end
+
+local function moneyNow() return tonumber(getState().money) or 0 end
+local function serverNow() return workspace:GetServerTimeNow() end
+
+local function dumpLines(value, maxDepth, maxLines)
+    local out, seen = {}, {}
+    local function walk(val, depth, indent, label)
+        if #out >= maxLines then return end
+        if type(val) == "table" then
+            if seen[val] then out[#out + 1] = indent .. label .. " = <cycle>" return end
+            if depth >= maxDepth then out[#out + 1] = indent .. label .. " = {… " .. countKeys(val) .. " clés}" return end
+            seen[val] = true
+            out[#out + 1] = indent .. label .. " = {"
+            local keys = {}
+            for k in pairs(val) do keys[#keys + 1] = k end
+            table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+            for _, k in ipairs(keys) do walk(val[k], depth + 1, indent .. "  ", tostring(k)) end
+            out[#out + 1] = indent .. "}"
+            seen[val] = nil
+        else
+            out[#out + 1] = indent .. label .. " = " .. tostring(val) .. " (" .. typeof(val) .. ")"
+        end
+    end
+    walk(value, 0, "", "root")
+    return out
+end
+
+local function printDump(title, value, maxDepth, maxLines)
+    print("[Sakura] ===== " .. title .. " =====")
+    for _, l in ipairs(dumpLines(value, maxDepth or 3, maxLines or 120)) do print(l) end
+end
+
+---------------------------------------------------------------------
+-- Couche remotes (timeouts + apprentissage des arguments)
+---------------------------------------------------------------------
+local CALL_TIMEOUT = 3
+
+local function runWithTimeout(timeout, fn)
+    local done, packed = false, nil
+    local thread = task.spawn(function()
+        packed = table.pack(pcall(fn))
+        done = true
+    end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < timeout do task.wait(0.03) end
+    if not done then
+        pcall(task.cancel, thread)
+        return "timeout"
+    end
+    if packed[1] then return "ok", table.unpack(packed, 2, packed.n) end
+    return "error", packed[2]
+end
+
+-- Envoie une requête. Retourne true si elle est partie (pas forcément acceptée par le serveur).
+local function invoke(name, ...)
+    local okGet, remote = pcall(function() return Remotes[name] end)
+    if not okGet or remote == nil then return false, "remote introuvable: " .. tostring(name) end
+    local args = table.pack(...)
+
+    if typeof(remote) == "Instance" then
+        if remote:IsA("RemoteFunction") then
+            local status, a = runWithTimeout(CALL_TIMEOUT, function()
+                return remote:InvokeServer(table.unpack(args, 1, args.n))
+            end)
+            return status == "ok", a
+        end
+        local ok, err = pcall(function() remote:FireServer(table.unpack(args, 1, args.n)) end)
+        return ok, err
+    end
+
+    local function fire()
+        local status, err = runWithTimeout(2, function()
+            local f = remote.Fire or remote.fire
+            if not f then error("pas de méthode Fire") end
+            f(remote, table.unpack(args, 1, args.n))
+        end)
+        return status == "ok", err
+    end
+
+    local function call()
+        return runWithTimeout(CALL_TIMEOUT, function()
+            local c = remote.Call or remote.call
+            if not c then error("pas de méthode Call") end
+            local p = c(remote, table.unpack(args, 1, args.n))
+            if typeof(p) == "table" and type(p.Await) == "function" then return p:Await() end
+            return p
+        end)
+    end
+
+    local mode = remoteMode[name]
+    if mode == "fire" then return fire() end
+
+    local status, a, b = call()
+    if status == "ok" then
+        remoteMode[name] = "call"
+        return true, a, b
+    end
+    if status == "timeout" then
+        if mode == "call" then return false, "timeout" end
+        remoteMode[name] = "fire" -- requête partie mais jamais de réponse : remote de type événement
+        return true
+    end
+    if mode == "call" then return false, a end
+    local okFire, err = fire()
+    if okFire then remoteMode[name] = "fire" end
+    return okFire, err
+end
+
+-- Teste des formats d'arguments jusqu'à ce que l'état du jeu change, puis mémorise le bon.
+local failures, cooldownUntil = {}, {}
+local function probe(key, remoteName, variants, snap, changed, opts)
+    opts = opts or {}
+    local settle = opts.settle or 1.2
+    if os.clock() < (cooldownUntil[key] or 0) then return false, "cooldown" end
+
+    local function attempt(i)
+        local build = variants[i]
+        local args = build and build()
+        if not args then return false end
+        local before = snap()
+        if not invoke(remoteName, table.unpack(args, 1, args.n or #args)) then return false end
+        local t0 = os.clock()
+        while alive() and os.clock() - t0 < settle do
+            task.wait(0.15)
+            if changed(before, snap()) then return true end
+        end
+        return false
+    end
+
+    local idx = Learned[key]
+    if idx and variants[idx] then
+        if attempt(idx) then failures[key] = 0 return true end
+        failures[key] = (failures[key] or 0) + 1
+        if failures[key] >= 8 then
+            Learned[key] = nil
+            failures[key] = 0
+            log("Variante oubliée pour", key, "(trop d'échecs) — nouvel apprentissage au prochain essai")
+        elseif failures[key] % 3 == 0 then
+            cooldownUntil[key] = os.clock() + 60
+        end
+        return false
+    end
+
+    for i = 1, #variants do
+        if not alive() then return false end
+        if attempt(i) then
+            Learned[key] = i
+            failures[key] = 0
+            saveSettings()
+            log("✔ " .. key .. ": variante #" .. i .. " validée")
+            return true
+        end
+    end
+    local cd = opts.cooldown
+    if cd == nil then cd = 45 end
+    if cd > 0 then cooldownUntil[key] = os.clock() + cd end
+    return false
+end
+
+---------------------------------------------------------------------
+-- Monde : positions, téléportation, prompts
+---------------------------------------------------------------------
+local function getHRP()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
 
 local function getPartCFrame(inst)
     if not inst then return nil end
-    if inst:IsA("BasePart") then
-        return inst.CFrame
-    elseif inst:IsA("Attachment") then
-        return inst.WorldCFrame
-    elseif inst:IsA("Model") then
-        return inst:GetPivot()
-    elseif inst:IsA("ProximityPrompt") and inst.Parent then
-        return getPartCFrame(inst.Parent)
-    end
+    if inst:IsA("BasePart") then return inst.CFrame end
+    if inst:IsA("Attachment") then return inst.WorldCFrame end
+    if inst:IsA("Model") then return inst:GetPivot() end
+    if inst:IsA("ProximityPrompt") and inst.Parent then return getPartCFrame(inst.Parent) end
     return nil
 end
 
 local function triggerPrompt(prompt)
-    if not prompt or not prompt.Enabled then return end
-    if fireproximityprompt then
-        pcall(function() fireproximityprompt(prompt) end)
+    if not (prompt and prompt.Enabled) then return end
+    if type(fireproximityprompt) == "function" then
+        pcall(fireproximityprompt, prompt)
+    else
+        pcall(function()
+            prompt:InputHoldBegin()
+            task.wait((prompt.HoldDuration or 0) + 0.05)
+            prompt:InputHoldEnd()
+        end)
     end
-    pcall(function()
-        prompt:InputHoldBegin()
-        task.wait(prompt.HoldDuration or 0)
-        prompt:InputHoldEnd()
-    end)
 end
 
-local function getMaxPlacementLimit()
-    local limit = 3
-    pcall(function()
-        local PLC = Shared:FindFirstChild("config") and Shared.config:FindFirstChild("PlacementLimitConfig")
-        local mod = PLC and require(PLC)
-        if mod and mod.GetLimit then
-            local s = getState()
-            limit = mod.GetLimit(s.placementLimitLevel or 0)
-        elseif mod and mod.BaseLimit then
-            limit = mod.BaseLimit + (getState().placementLimitLevel or 0)
-        end
-    end)
-    return limit or 3
-end
-
-local function getPlacedItemCount()
-    local s = getState()
-    local placedEggs = s.placedEggs or {}
-    local placedBoxes = s.placedLootboxes or {}
-    local count = 0
-    for _ in pairs(placedEggs) do count = count + 1 end
-    for _ in pairs(placedBoxes) do count = count + 1 end
-    pcall(function()
-        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        if pg then
-            local guiCount = 0
-            for _, g in ipairs(pg:GetChildren()) do
-                if g:IsA("BillboardGui") and (g.Name:find("LootboxTimer_") or g.Name:find("EggTimer_")) then
-                    guiCount = guiCount + 1
-                end
-            end
-            if guiCount > count then count = guiCount end
-        end
-    end)
-    return count
-end
-
-local function hasSpaceToPlace()
-    local currentCount = getPlacedItemCount()
-    local maxLimit = getMaxPlacementLimit()
-    return currentCount < maxLimit, currentCount, maxLimit
-end
-
-local function findPlayerBase()
-    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if pg then
-        local pbi = pg:FindFirstChild("PlayerBaseIndicator", true)
-        if pbi and pbi:IsA("BillboardGui") and pbi.Adornee then
-            local ad = pbi.Adornee
-            return ad:IsA("Model") and ad or ad.Parent
-        end
-        local hi = pg:FindFirstChild("HomeIndicator", true)
-        if hi and hi:IsA("BillboardGui") and hi.Adornee then
-            local ad = hi.Adornee
-            return ad:IsA("Model") and ad or ad.Parent
-        end
-    end
-    for _, obj in ipairs(workspace:GetChildren()) do
-        if obj:IsA("Model") or obj:IsA("Folder") then
-            if obj.Name:find(LocalPlayer.Name) or obj.Name:find(tostring(LocalPlayer.UserId)) then
-                return obj
-            end
-            local owner = obj:FindFirstChild("Owner") or obj:FindFirstChild("Player")
-            if owner and (owner.Value == LocalPlayer or owner.Value == LocalPlayer.Name or tostring(owner.Value) == tostring(LocalPlayer.UserId)) then
-                return obj
-            end
-        end
-    end
-    return nil
+local teleportBusy = false
+local function withTeleport(cf, radius, fn)
+    local hrp = getHRP()
+    if not (hrp and cf) or (hrp.Position - cf.Position).Magnitude <= radius then return fn() end
+    if teleportBusy then return false end
+    teleportBusy = true
+    local saved = hrp.CFrame
+    hrp.CFrame = cf + Vector3.new(0, 3, 0)
+    task.wait(0.4)
+    local ok, res = pcall(fn)
+    local again = getHRP()
+    if again then again.CFrame = saved end
+    teleportBusy = false
+    if not ok then log("Erreur pendant la téléportation:", res) return false end
+    return res
 end
 
 local function getBaseCFrame()
-    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if pg then
-        local pbi = pg:FindFirstChild("PlayerBaseIndicator", true)
-        if pbi and pbi:IsA("BillboardGui") and pbi.Adornee then
-            local cf = getPartCFrame(pbi.Adornee)
+    local home = PlayerGui:FindFirstChild("HomeIndicator")
+    if home and home:IsA("BillboardGui") and home.Adornee then
+        local cf = getPartCFrame(home.Adornee)
+        if cf then return cf end
+    end
+    for _, g in ipairs(PlayerGui:GetChildren()) do
+        if g:IsA("BillboardGui") and g.Adornee and (g.Name:find("LootboxTimer_", 1, true) or g.Name:find("EggTimer_", 1, true)) then
+            local cf = getPartCFrame(g.Adornee)
             if cf then return cf end
         end
-        local hi = pg:FindFirstChild("HomeIndicator", true)
-        if hi and hi:IsA("BillboardGui") and hi.Adornee then
-            local cf = getPartCFrame(hi.Adornee)
-            if cf then return cf end
-        end
-        for _, g in ipairs(pg:GetChildren()) do
-            if g:IsA("BillboardGui") and (g.Name:find("LootboxTimer_") or g.Name:find("EggTimer_")) and g.Adornee then
-                local cf = getPartCFrame(g.Adornee)
-                if cf then return cf end
-            end
-        end
     end
-    local base = findPlayerBase()
-    if base then
-        return getPartCFrame(base)
-    end
+    local pbi = PlayerGui:FindFirstChild("PlayerBaseIndicator")
+    if pbi and pbi:IsA("BillboardGui") and pbi.Adornee then return getPartCFrame(pbi.Adornee) end
     return nil
 end
 
-local function getAuctionHouseCFrame()
-    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if pg then
-        local dot = pg:FindFirstChild("IndicatorDotBgui_AuctionHousePart", true)
-        if dot and dot:IsA("BillboardGui") and dot.Adornee then
-            local cf = getPartCFrame(dot.Adornee)
-            if cf then return cf, dot.Adornee end
-        end
+local function auctionTarget()
+    local dot = PlayerGui:FindFirstChild("IndicatorDotBgui_AuctionHousePart")
+    if dot and dot:IsA("BillboardGui") and dot.Adornee then
+        local cf = getPartCFrame(dot.Adornee)
+        if cf then return cf, dot.Adornee end
     end
-    for _, tagged in ipairs(CollectionService:GetTagged("AuctionHouse")) do
-        local cf = getPartCFrame(tagged)
-        if cf then return cf, tagged end
-        if tagged:IsA("ProximityPrompt") and tagged.Parent then
-            local pcf = getPartCFrame(tagged.Parent)
-            if pcf then return pcf, tagged.Parent end
-        end
+    for _, inst in ipairs(CollectionService:GetTagged("AuctionHouse")) do
+        local cf = getPartCFrame(inst)
+        if cf then return cf, inst end
     end
-    local part = workspace:FindFirstChild("AuctionHousePart", true)
-    if part then
-        local cf = getPartCFrame(part)
-        if cf then return cf, part end
-    end
-    local configCf = nil
-    pcall(function()
-        local AHC = Shared:FindFirstChild("config") and Shared.config:FindFirstChild("AuctionHouseConfig")
-        local mod = AHC and require(AHC)
-        if mod and mod.Guide and mod.Guide.Position then
-            configCf = CFrame.new(mod.Guide.Position)
-        end
-    end)
-    if configCf then return configCf, nil end
+    local mod = loadConfig("AuctionHouseConfig")
+    if mod and mod.Guide and mod.Guide.Position then return CFrame.new(mod.Guide.Position), nil end
     return nil, nil
 end
 
-local function getFreeBaseSlot()
-    local s = getState()
-    local occupied = {}
-    for _, d in pairs(s.placedEggs or {}) do
-        if type(d) == "table" then
-            local sl = d.Slot or d.slot or d.Index or d.index or d.Stand or d.stand
-            if sl and tonumber(sl) then occupied[tonumber(sl)] = true end
-        end
+local function equipTool(name)
+    local char = LocalPlayer.Character
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if not (char and bp) then return end
+    local tool = bp:FindFirstChild(name)
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if tool and tool:IsA("Tool") and hum then
+        pcall(function() hum:EquipTool(tool) end)
+        task.wait(0.15)
     end
-    for _, d in pairs(s.placedLootboxes or {}) do
-        if type(d) == "table" then
-            local sl = d.Slot or d.slot or d.Index or d.index or d.Stand or d.stand
-            if sl and tonumber(sl) then occupied[tonumber(sl)] = true end
-        end
-    end
-    local maxLimit = getMaxPlacementLimit()
-    for i = 1, maxLimit do
-        if not occupied[i] then
+end
+
+---------------------------------------------------------------------
+-- Fonctionnalité : collecte d'argent
+---------------------------------------------------------------------
+local Status = { collect = "En attente", auction = "En attente", lastAction = "" }
+local Cash = { busy = false, session = nil }
+
+local function slotKeys()
+    local out = {}
+    for k in pairs(getState().baseSlots or {}) do out[#out + 1] = k end
+    table.sort(out, function(a, b) return (tonumber(a) or 0) < (tonumber(b) or 0) end)
+    return out
+end
+
+local CollectRunners = {
+    function() invoke("RequestCollectCash") end,
+    function() for _, k in ipairs(slotKeys()) do invoke("RequestCollectCash", tonumber(k) or k) end end,
+    function() for _, k in ipairs(slotKeys()) do invoke("RequestCollectCash", tostring(k)) end end,
+}
+
+local function ensureCollectVariant()
+    if Learned.CollectCash and CollectRunners[Learned.CollectCash] then return Learned.CollectCash end
+    Status.collect = "Apprentissage de la méthode de collecte…"
+    local m0 = moneyNow()
+    task.wait(1.5)
+    local passive = math.max(0, moneyNow() - m0) -- gain passif mesuré sur 1,5 s
+    for i, run in ipairs(CollectRunners) do
+        if not alive() then return nil end
+        local a = moneyNow()
+        run()
+        task.wait(1.5)
+        if moneyNow() - a > passive * 2 + 1 then
+            Learned.CollectCash = i
+            saveSettings()
+            log("✔ Collecte: méthode #" .. i .. " validée")
             return i
         end
     end
+    log("Collecte: aucun gain mesurable, méthode #1 utilisée par défaut (relance l'apprentissage via Réglages si besoin)")
     return 1
 end
 
+local function collectCash()
+    if Cash.busy then return end
+    Cash.busy = true
+    local ok, err = pcall(function()
+        local v = Cash.session or ensureCollectVariant()
+        Cash.session = v
+        if v then
+            CollectRunners[v]()
+            Status.collect = "Méthode #" .. v .. " • dernière collecte " .. os.date("%H:%M:%S")
+        end
+    end)
+    Cash.busy = false
+    if not ok then log("Collecte:", err) end
+end
+
+---------------------------------------------------------------------
+-- Fonctionnalité : achats (œufs, boîtes, caisse déco)
+---------------------------------------------------------------------
+local SKIP_ITEMS = { MythicEgg = true }
+
+local function buyShopSlots(itemsKey, soldKey, remoteName, skip)
+    local s = getState()
+    for slot = 1, 3 do
+        if not alive() then return end
+        local name = at(s[itemsKey], slot)
+        if name and at(s[soldKey], slot) ~= true and not (skip and skip[name]) then
+            probe(remoteName, remoteName, {
+                function() return { slot } end,
+                function() return { name } end,
+                function() return { slot, name } end,
+                function() return { { Slot = slot } } end,
+            }, function()
+                local ss = getState()
+                return { sold = at(ss[soldKey], slot) == true, stack = stackOf(ss, name) }
+            end, function(b, a)
+                return (a.sold and not b.sold) or a.stack > b.stack
+            end)
+            task.wait(0.25)
+        end
+    end
+end
+
+local function buyDecoCrate()
+    local id = "FunctionalObjectsCrate"
+    local function stock() return tonumber((getState().decorationsStoreStock or {})[id]) or 0 end
+    if stock() <= 0 then return end
+    probe("BuyDecorationsStoreItem", "BuyDecorationsStoreItem", {
+        function() return { id } end,
+        function() return { id, 1 } end,
+        function() return { { ItemId = id } } end,
+    }, function()
+        return { stock = stock(), stack = stackOf(getState(), id) }
+    end, function(b, a)
+        return a.stock < b.stock or a.stack > b.stack
+    end)
+end
+
+---------------------------------------------------------------------
+-- Fonctionnalité : placement / ouverture
+---------------------------------------------------------------------
+local RarityScore = {
+    MythicFloatCrate = 100, OceanEgg = 90, LegendaryFloatCrate = 80, EpicFloatCrate = 70,
+    ForestEgg = 60, RareFloatCrate = 50, FarmEgg = 40, CommonFloatCrate = 30,
+    FunctionalObjectsCrate = 25, CatFloatCrate = 20,
+}
+
+local function placementLimit(s)
+    local level = s.placementLimitLevel or 0
+    local mod = loadConfig("PlacementLimitConfig")
+    if mod then
+        if type(mod.GetLimit) == "function" then
+            local ok, v = pcall(mod.GetLimit, level)
+            if ok and type(v) == "number" and v >= 1 then return v end
+            ok, v = pcall(mod.GetLimit, s)
+            if ok and type(v) == "number" and v >= 1 then return v end
+        end
+        if tonumber(mod.BaseLimit) then return mod.BaseLimit + level end
+    end
+    return 3 + level
+end
+
+local function placedCount(s)
+    return countKeys(s.placedEggs) + countKeys(s.placedLootboxes)
+end
+
+local function freeSlotIndex(s, limit)
+    local used = {}
+    for _, group in ipairs({ s.placedEggs or {}, s.placedLootboxes or {} }) do
+        for _, d in pairs(group) do
+            if type(d) == "table" then
+                for _, k in ipairs({ "Slot", "slot", "Index", "index", "Stand", "stand", "Spot", "spot" }) do
+                    local v = tonumber(d[k])
+                    if v then used[v] = true end
+                end
+            end
+        end
+    end
+    for i = 1, limit do if not used[i] then return i end end
+    return placedCount(s) + 1
+end
+
+local function pickCandidate(s)
+    local list = {}
+    for key, item in pairs(s.inventory or {}) do
+        if type(item) == "table" and (tonumber(item.Stack) or 0) > 0 then
+            local name = item.ConfigName or tostring(key)
+            if item.Category == "Egg" and not SKIP_ITEMS[name] then
+                list[#list + 1] = { Name = name, Type = "Egg", Score = RarityScore[name] or 35 }
+            elseif item.Category == "FloatLootbox" then
+                list[#list + 1] = { Name = name, Type = "Box", Score = RarityScore[name] or 25 }
+            end
+        end
+    end
+    if #list == 0 then return nil end
+    local prio = Config.OpenPriority
+    table.sort(list, function(a, b)
+        if prio == "EggsFirst" and a.Type ~= b.Type then return a.Type == "Egg" end
+        if prio == "BoxesFirst" and a.Type ~= b.Type then return a.Type == "Box" end
+        if a.Score ~= b.Score then return a.Score > b.Score end
+        return a.Name < b.Name
+    end)
+    return list[1]
+end
+
+local Place = { last = 0 }
+local function placeOne()
+    if os.clock() - Place.last < 2 then return false end
+    local s = getState()
+    local limit = placementLimit(s)
+    if placedCount(s) >= limit then return false end
+    local cand = pickCandidate(s)
+    if not cand then return false end
+    Place.last = os.clock()
+
+    local name = cand.Name
+    local slot = freeSlotIndex(s, limit)
+    local remoteName = cand.Type == "Egg" and "PlaceEgg" or "PlaceFloatLootbox"
+    local baseCF = getBaseCFrame()
+    equipTool(name)
+
+    local variants = {
+        function() return { name } end,
+        function() return { name, slot } end,
+        function() return { slot, name } end,
+        function() return { { ConfigName = name, Slot = slot } } end,
+        function() return baseCF and { name, baseCF } or nil end,
+    }
+    local function snap()
+        local ss = getState()
+        return { n = placedCount(ss), stack = stackOf(ss, name) }
+    end
+    local function changed(b, a) return a.n > b.n or a.stack < b.stack end
+
+    local ok = probe(remoteName, remoteName, variants, snap, changed, { cooldown = 0 })
+    if not ok and Config.AllowTeleport and baseCF then
+        ok = withTeleport(baseCF, 15, function()
+            return (probe(remoteName, remoteName, variants, snap, changed))
+        end)
+    end
+    if ok then Status.lastAction = "Placé: " .. name end
+    return ok
+end
+
+-- Timers ---------------------------------------------------------------
 local function parseTimerText(text)
-    if not text or text == "" then return nil end
-    local low = string.lower(text)
-    if low:find("open") or low:find("ready") or low:find("claim") or low:find("hatch") or low == "0:00" or low == "00:00" or low == "0s" then
+    if type(text) ~= "string" or text == "" then return nil end
+    local low = text:lower()
+    local a, b, c = low:match("(%d+):(%d+):(%d+)")
+    if a then return tonumber(a) * 3600 + tonumber(b) * 60 + tonumber(c) end
+    a, b = low:match("(%d+):(%d+)")
+    if a then return tonumber(a) * 60 + tonumber(b) end
+    local total, found = 0, false
+    for n, unit in low:gmatch("(%d+)%s*([dhms])%f[%A]") do
+        found = true
+        n = tonumber(n)
+        if unit == "d" then total += n * 86400
+        elseif unit == "h" then total += n * 3600
+        elseif unit == "m" then total += n * 60
+        else total += n end
+    end
+    if found then return total end
+    if low:find("ready") or low:find("open") or low:find("claim") or low:find("hatch") or low:find("done") then
         return 0
     end
-    local m, s = low:match("(%d+):(%d+)")
-    if m and s then
-        return tonumber(m) * 60 + tonumber(s)
-    end
-    local sec = low:match("(%d+)%s*s")
-    if sec then return tonumber(sec) end
-    local min = low:match("(%d+)%s*m")
-    if min then return tonumber(min) * 60 end
     return nil
 end
 
-local function isTimerFinished(id, data, category)
-    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if pg then
-        local guiName = (category == "Egg" and "EggTimer_" or "LootboxTimer_") .. tostring(id)
-        local timerGui = pg:FindFirstChild(guiName) or pg:FindFirstChild("Timer_" .. tostring(id))
-        if timerGui then
-            for _, desc in ipairs(timerGui:GetDescendants()) do
-                if desc:IsA("TextLabel") and desc.Visible then
-                    local remSec = parseTimerText(desc.Text)
-                    if remSec ~= nil then
-                        if remSec > 0 then
-                            return false
-                        else
-                            return true
-                        end
+local function guiRemaining(prefixes, id)
+    for _, prefix in ipairs(prefixes) do
+        local gui = PlayerGui:FindFirstChild(prefix .. tostring(id))
+        if gui then
+            local positive, zero = nil, false
+            for _, d in ipairs(gui:GetDescendants()) do
+                if d:IsA("TextLabel") and d.Visible and d.Text ~= "" then
+                    local sec = parseTimerText(d.Text)
+                    if sec then
+                        if sec > 0 then positive = math.min(positive or math.huge, sec) else zero = true end
                     end
                 end
             end
+            if positive then return positive end
+            if zero then return 0 end
+            return nil
         end
     end
-    local base = findPlayerBase()
-    if base then
-        for _, desc in ipairs(base:GetDescendants()) do
-            if desc:IsA("ProximityPrompt") and desc.Enabled then
-                local act = tostring(desc.ActionText):lower()
-                if act:find("open") or act:find("hatch") or act:find("claim") then
-                    if tostring(desc.Parent):find(tostring(id)) or (desc:FindFirstAncestorWhichIsA("Model") and desc:FindFirstAncestorWhichIsA("Model").Name:find(tostring(id))) then
-                        return true
-                    end
-                end
-            end
-        end
-    end
-    if type(data) == "table" then
-        if data.Ready == true or data.ready == true or data.isReady == true then
-            return true
-        end
-        local rem = data.RemainingSeconds or data.remainingSeconds or data.remaining or data.Timer or data.timer
-        if rem ~= nil and tonumber(rem) then
-            if tonumber(rem) > 0 then
-                return false
-            else
-                return true
-            end
-        end
-        local now = workspace:GetServerTimeNow() or os.time()
-        local endT = data.endTime or data.EndTime or data.readyAt or data.finishTime
-        if endT and tonumber(endT) then
-            if tonumber(endT) > now then
-                return false
-            else
-                return true
-            end
-        end
-    end
+    return nil
+end
+
+local END_KEYS = { "readyat", "endtime", "endsat", "endat", "finishat", "finishtime", "finishedat",
+    "opensat", "openat", "hatchat", "completeat", "completedat", "unlockat", "expiresat", "readytime" }
+local REMAIN_KEYS = { "remaining", "timeleft", "secondsleft" }
+local START_KEYS = { "startedat", "starttime", "placedat", "placetime", "createdat" }
+local DURATION_KEYS = { "duration", "hatchduration", "opentime", "hatchtime", "seconds" }
+
+local function matchAny(key, list)
+    for _, p in ipairs(list) do if key:find(p, 1, true) then return true end end
     return false
 end
 
-local function collectCash()
-    local s = getState()
-    local slots = s.baseSlots or {}
-    for slotIndex, _ in pairs(slots) do
-        fireRemote(Remotes.RequestCollectCash, tostring(slotIndex))
-        fireRemote(Remotes.RequestCollectCash, tonumber(slotIndex))
-    end
-    fireRemote(Remotes.RequestCollectCash)
-    fireRemote(Remotes.AutoCollectActivated)
-    fireRemote(Remotes.RequestUseAutoCollect, true)
+local function normalizeTs(v)
+    if v > 1e11 then v = v / 1000 end
+    if v > 1.5e9 and v < 3e9 then return v end
+    return nil
 end
 
-local function buyEggs()
-    if not Config.AutoBuyEggs then return end
+-- Retourne true / false / nil (inconnu) à partir des données d'état de l'item placé.
+local function readyFromData(data)
+    if type(data) ~= "table" then return nil end
+    if data.Ready == true or data.ready == true or data.isReady == true then return true end
+    local endAt, remaining, startAt, duration
+    for k, v in pairs(data) do
+        if type(k) == "string" and type(v) == "number" then
+            local lk = k:lower()
+            if matchAny(lk, END_KEYS) then endAt = endAt or normalizeTs(v)
+            elseif matchAny(lk, REMAIN_KEYS) then remaining = v
+            elseif matchAny(lk, START_KEYS) then startAt = startAt or normalizeTs(v)
+            elseif matchAny(lk, DURATION_KEYS) then duration = v end
+        end
+    end
+    if endAt then return serverNow() >= endAt end
+    if startAt and duration then return serverNow() >= startAt + duration end
+    if remaining and remaining <= 0 then return true end
+    return nil
+end
+
+local function isReady(kind, id, data)
+    local prefixes = (kind == "Egg") and { "EggTimer_", "Timer_" } or { "LootboxTimer_", "Timer_" }
+    local sec = guiRemaining(prefixes, id)
+    if sec ~= nil then return sec <= 0 end
+    return readyFromData(data)
+end
+
+local function promptFallback(kind, id)
+    if not Config.AllowTeleport then return false end
+    local gui = PlayerGui:FindFirstChild((kind == "Egg" and "EggTimer_" or "LootboxTimer_") .. tostring(id))
+    local ad = gui and gui:IsA("BillboardGui") and gui.Adornee
+    if not ad then return false end
+    local root = ad:FindFirstAncestorOfClass("Model") or ad
+    local cf = getPartCFrame(ad)
+    return withTeleport(cf, 12, function()
+        local fired = false
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("ProximityPrompt") and d.Enabled then
+                local act = tostring(d.ActionText):lower()
+                if act:find("open") or act:find("hatch") or act:find("claim") then
+                    triggerPrompt(d)
+                    fired = true
+                    task.wait(0.1)
+                end
+            end
+        end
+        return fired
+    end)
+end
+
+local lastTry, tryCount = {}, {}
+local function openPlaced(kind, id)
+    local remoteName = (kind == "Egg") and "HatchEgg" or "OpenFloatLootbox"
+    local groupKey = (kind == "Egg") and "placedEggs" or "placedLootboxes"
+
+    local function snap()
+        local d = (getState()[groupKey] or {})[id]
+        return { exists = d ~= nil, sig = d ~= nil and deepSig(d, 2) or "" }
+    end
+    local function changed(b, a)
+        return (b.exists and not a.exists) or (a.exists and a.sig ~= b.sig)
+    end
+
+    local ok = probe(remoteName, remoteName, {
+        function() return { id } end,
+        function() return { { Id = id } } end,
+        function() return { { id = id } } end,
+    }, snap, changed, { cooldown = 0 })
+
+    tryCount[id] = (tryCount[id] or 0) + 1
+    if not ok and tryCount[id] >= 2 then ok = promptFallback(kind, id) end
+
+    if kind == "Box" and (ok or tryCount[id] % 2 == 0) then
+        invoke("ClaimFloatLootboxReward", id)
+    end
+    if ok then
+        tryCount[id] = nil
+        Status.lastAction = (kind == "Egg" and "Éclos: " or "Ouvert: ") .. tostring(id):sub(1, 8)
+    end
+    return ok
+end
+
+local function processOpen(force)
     local s = getState()
-    local items = s.eggShopItems or {}
-    local sold = s.eggShopSoldSlots or {}
-    for slotIdx = 1, 3 do
-        local eggName = items[slotIdx]
-        local isSold = sold[slotIdx] == true
-        if eggName and not isSold then
-            if eggName ~= "MythicEgg" and not tostring(eggName):lower():find("mythic") then
-                fireRemote(Remotes.BuyEgg, slotIdx)
-                fireRemote(Remotes.BuyEgg, tostring(slotIdx))
-                fireRemote(Remotes.BuyEgg, eggName)
-                fireRemote(Remotes.BuyEgg, slotIdx, eggName)
-                task.wait(0.2)
+    for kind, key in pairs({ Egg = "placedEggs", Box = "placedLootboxes" }) do
+        for id in pairs(s[key] or {}) do
+            if not alive() then return end
+            local data = s[key][id]
+            local ready = isReady(kind, id, data)
+            if ready ~= false then
+                -- prêt : on réessaie toutes les 6 s ; indéterminé : toutes les 45 s (3 s si bouton manuel)
+                local interval = (ready == true) and 6 or (force and 3 or 45)
+                if os.clock() - (lastTry[id] or -1e9) >= interval then
+                    lastTry[id] = os.clock()
+                    openPlaced(kind, id)
+                end
             end
         end
     end
 end
 
-local function buyBoxes()
-    if not Config.AutoBuyBoxes then return end
+---------------------------------------------------------------------
+-- Fonctionnalité : Auction House (achat direct)
+---------------------------------------------------------------------
+local Auction = { busy = false, last = 0, lastTp = -1e9 }
+
+local function auctionSnap()
     local s = getState()
-    local items = s.lootboxShopItems or {}
-    local sold = s.lootboxShopSoldSlots or {}
-    for slotIdx = 1, 3 do
-        local boxName = items[slotIdx]
-        local isSold = sold[slotIdx] == true
-        if boxName and not isSold then
-            fireRemote(Remotes.BuyFloatLootbox, slotIdx)
-            fireRemote(Remotes.BuyFloatLootbox, tostring(slotIdx))
-            fireRemote(Remotes.BuyFloatLootbox, boxName)
-            fireRemote(Remotes.BuyFloatLootbox, slotIdx, boxName)
-            if boxName == "FunctionalObjectsCrate" or tostring(boxName):find("Functional") then
-                fireRemote(Remotes.BuyDecorationsStoreItem, "FunctionalObjectsCrate")
-                fireRemote(Remotes.BuyDecorationsStoreItem, slotIdx)
-                fireRemote(Remotes.BuyDecoration, "FunctionalObjectsCrate")
-            end
-            task.wait(0.2)
-        end
-    end
-    local decoStock = s.decorationsStoreStock or {}
-    if decoStock["FunctionalObjectsCrate"] ~= 0 then
-        fireRemote(Remotes.BuyDecorationsStoreItem, "FunctionalObjectsCrate")
-        fireRemote(Remotes.BuyDecorationsStoreItem, 1)
-        fireRemote(Remotes.BuyDecoration, "FunctionalObjectsCrate")
-    end
+    return table.concat({
+        deepSig(s.auctionPurchases, 3), deepSig(s.auctionEscrow, 2),
+        tostring(s.gems), tostring(totalStacks(s)),
+    }, "#")
 end
 
-local isAuctionBusy = false
-local function buyAuctionHouseDirect()
-    if not Config.AutoBuyAuctionHouse or isAuctionBusy then return end
-    isAuctionBusy = true
+local function buyAuctionSlot(slot)
+    return probe("AuctionBuy", "AuctionBuy", {
+        function() return { slot } end,
+        function() return { { Slot = slot } } end,
+        function() return { slot, 1 } end,
+        function() return { tostring(slot) } end,
+    }, auctionSnap, function(b, a) return a ~= b end, { cooldown = 0 })
+end
+
+local function auctionPass(force)
+    local bought = 0
+    for slot = 1, 6 do
+        for _ = 1, 5 do
+            if not alive() or not (force or Config.AutoBuyAuction) then return bought end
+            if buyAuctionSlot(slot) then bought += 1 task.wait(0.4) else break end
+        end
+    end
+    return bought
+end
+
+local function buyAuction(force)
+    if Auction.busy then return end
+    Auction.busy = true
+    Auction.last = os.clock()
+    local ok, err = pcall(function()
+        invoke("GetAuctionHouseState")
+        task.wait(0.3)
+        local needsTp = Learned.AuctionNeedsTp == true
+        local got = 0
+        local cf, inst = auctionTarget()
+
+        local function pass()
+            if inst then
+                local prompts = inst:IsA("ProximityPrompt") and { inst } or {}
+                if #prompts == 0 then
+                    for _, d in ipairs(inst:GetDescendants()) do
+                        if d:IsA("ProximityPrompt") then prompts[#prompts + 1] = d end
+                    end
+                end
+                for _, p in ipairs(prompts) do triggerPrompt(p) end
+                task.wait(0.3)
+            end
+            return auctionPass(force)
+        end
+
+        if needsTp and Config.AllowTeleport and cf then
+            got = withTeleport(cf, 10, pass) or 0
+        else
+            got = auctionPass(force)
+            local canTp = Config.AllowTeleport and cf and Learned.AuctionBuy == nil
+                and (os.clock() - Auction.lastTp > 600)
+            if got == 0 and canTp then
+                Auction.lastTp = os.clock()
+                got = withTeleport(cf, 10, pass) or 0
+                if got > 0 then Learned.AuctionNeedsTp = true saveSettings() end
+            end
+        end
+        Status.auction = string.format("%s • %d achat(s)", os.date("%H:%M:%S"), got)
+    end)
+    Auction.busy = false
+    if not ok then log("Auction:", err) end
+end
+
+---------------------------------------------------------------------
+-- Diagnostic
+---------------------------------------------------------------------
+local function runDiagnostic()
+    local s = getState()
+    print("[Sakura] ================= DIAGNOSTIC =================")
+    printDump("Variantes apprises", Config.Learned, 2, 40)
+    printDump("Modes des remotes", Config.Modes, 2, 40)
+    print("[Sakura] Limite de placement:", placementLimit(s), "| placés:", placedCount(s))
+    for kind, key in pairs({ Egg = "placedEggs", Box = "placedLootboxes" }) do
+        for id, data in pairs(s[key] or {}) do
+            local prefixes = (kind == "Egg") and { "EggTimer_" } or { "LootboxTimer_" }
+            print(string.format("[Sakura] %s %s | prêt(gui)=%s | prêt(data)=%s",
+                kind, tostring(id), tostring(guiRemaining(prefixes, id)), tostring(readyFromData(data))))
+            printDump("données " .. tostring(id), data, 2, 30)
+        end
+    end
+    task.spawn(function()
+        local ok, a, b = invoke("GetAuctionHouseState")
+        print("[Sakura] GetAuctionHouseState ok =", ok, "mode =", remoteMode.GetAuctionHouseState)
+        if ok then
+            printDump("Auction retour #1", a, 4, 120)
+            printDump("Auction retour #2", b, 4, 120)
+        end
+        print("[Sakura] ================= FIN DIAGNOSTIC =================")
+    end)
+    log("Diagnostic envoyé dans la console (F9)")
+end
+
+---------------------------------------------------------------------
+-- Anti-AFK
+---------------------------------------------------------------------
+track(LocalPlayer.Idled:Connect(function()
+    if not alive() or not Config.AntiAFK then return end
     pcall(function()
-        local char = LocalPlayer.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        local ahCFrame, ahPart = getAuctionHouseCFrame()
-        local savedCFrame = nil
-        if ahCFrame and hrp then
-            local dist = (hrp.Position - ahCFrame.Position).Magnitude
-            if dist > 8 then
-                savedCFrame = hrp.CFrame
-                hrp.CFrame = ahCFrame + Vector3.new(0, 2, 0)
-                task.wait(0.4)
-            end
-            local function checkAndTriggerPrompts(parent)
-                if not parent then return end
-                for _, desc in ipairs(parent:GetDescendants()) do
-                    if desc:IsA("ProximityPrompt") and desc.Enabled then
-                        triggerPrompt(desc)
-                    end
-                end
-            end
-            if ahPart then
-                checkAndTriggerPrompts(ahPart)
-            end
-            for _, tagged in ipairs(CollectionService:GetTagged("AuctionHouse")) do
-                if tagged:IsA("ProximityPrompt") and tagged.Enabled then
-                    triggerPrompt(tagged)
-                end
-            end
-            for _, desc in ipairs(workspace:GetDescendants()) do
-                if desc:IsA("ProximityPrompt") and desc.Enabled then
-                    local pcf = desc.Parent and getPartCFrame(desc.Parent)
-                    if pcf and (pcf.Position - hrp.Position).Magnitude <= 12 then
-                        local act = tostring(desc.ActionText):lower()
-                        local obj = tostring(desc.ObjectText):lower()
-                        if act:find("open") or act:find("auction") or obj:find("auction") then
-                            triggerPrompt(desc)
-                        end
-                    end
-                end
-            end
-            task.wait(0.3)
-        end
-        if Remotes.GetAuctionHouseState and Remotes.GetAuctionHouseState.Call then
-            pcall(function() Remotes.GetAuctionHouseState:Call():Await() end)
-            task.wait(0.2)
-        end
-        for slotIdx = 1, 6 do
-            if not isRunning or not Config.AutoBuyAuctionHouse then break end
-            if Remotes.AuctionBuy then
-                if Remotes.AuctionBuy.Call then
-                    pcall(function() Remotes.AuctionBuy:Call(slotIdx):Await() end)
-                    pcall(function() Remotes.AuctionBuy:Call(slotIdx, 1):Await() end)
-                    pcall(function() Remotes.AuctionBuy:Call(tostring(slotIdx)):Await() end)
-                    pcall(function() Remotes.AuctionBuy:Call({ Slot = slotIdx }):Await() end)
-                    pcall(function() Remotes.AuctionBuy:Call({ slot = slotIdx }):Await() end)
-                    pcall(function() Remotes.AuctionBuy:Call({ Slot = slotIdx, Amount = 1 }):Await() end)
-                end
-                if Remotes.AuctionBuy.Fire then
-                    pcall(function() Remotes.AuctionBuy:Fire(slotIdx) end)
-                    pcall(function() Remotes.AuctionBuy:Fire(slotIdx, 1) end)
-                    pcall(function() Remotes.AuctionBuy:Fire(tostring(slotIdx)) end)
-                    pcall(function() Remotes.AuctionBuy:Fire({ Slot = slotIdx }) end)
-                    pcall(function() Remotes.AuctionBuy:Fire({ slot = slotIdx }) end)
-                    pcall(function() Remotes.AuctionBuy:Fire({ Slot = slotIdx, Amount = 1 }) end)
-                end
-            end
-            pcall(function()
-                local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-                if pg then
-                    local ahGui = pg:FindFirstChild("AuctionHouse", true)
-                    if ahGui then
-                        for _, desc in ipairs(ahGui:GetDescendants()) do
-                            if desc:IsA("TextButton") or desc:IsA("ImageButton") then
-                                local txt = tostring(desc.Text or desc.Name):lower()
-                                if txt:find("buy") or txt:find("purchase") or txt:find("claim") then
-                                    if firesignal then
-                                        pcall(function() firesignal(desc.MouseButton1Click) end)
-                                        pcall(function() firesignal(desc.Activated) end)
-                                    end
-                                end
-                            end
-                        end
-                    end
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end))
+
+---------------------------------------------------------------------
+-- UI
+---------------------------------------------------------------------
+local Theme = {
+    Background = Color3.fromRGB(18, 14, 22), Sidebar = Color3.fromRGB(24, 18, 28),
+    Card = Color3.fromRGB(28, 21, 33), CardSub = Color3.fromRGB(38, 28, 45),
+    CardActive = Color3.fromRGB(50, 36, 60), Accent = Color3.fromRGB(255, 107, 139),
+    AccentSoft = Color3.fromRGB(255, 180, 200), Text = Color3.fromRGB(255, 245, 248),
+    TextDim = Color3.fromRGB(200, 168, 185), Green = Color3.fromRGB(115, 230, 155),
+    Red = Color3.fromRGB(255, 95, 120), StrokeSub = Color3.fromRGB(60, 44, 68),
+}
+
+local function new(class, props, parent)
+    local inst = Instance.new(class)
+    for k, v in pairs(props) do inst[k] = v end
+    if parent then inst.Parent = parent end
+    return inst
+end
+local function corner(inst, r) return new("UICorner", { CornerRadius = UDim.new(0, r) }, inst) end
+local function stroke(inst, color, thickness, transparency)
+    return new("UIStroke", { Color = color, Thickness = thickness, Transparency = transparency or 0 }, inst)
+end
+
+ScreenGui = new("ScreenGui", {
+    Name = GUI_NAME, ResetOnSpawn = false, DisplayOrder = 1000,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling, IgnoreGuiInset = true,
+})
+pcall(function() ScreenGui.Parent = guiRoot() end)
+if not ScreenGui.Parent then ScreenGui.Parent = PlayerGui end
+
+local cam = workspace.CurrentCamera
+local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+local WIN_W = math.clamp(vp.X - 24, 340, 620)
+local WIN_H = math.clamp(vp.Y - 24, 290, 430)
+local SIDE_W = WIN_W < 480 and 96 or 130
+
+local Main = new("Frame", {
+    Name = "SakuraMain", AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromOffset(vp.X / 2, vp.Y / 2), Size = UDim2.fromOffset(WIN_W, WIN_H),
+    BackgroundColor3 = Theme.Background, BorderSizePixel = 0, ClipsDescendants = true,
+}, ScreenGui)
+corner(Main, 14)
+stroke(Main, Theme.Accent, 1.4)
+
+local TopBar = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = Theme.Sidebar, BorderSizePixel = 0, Active = true,
+}, Main)
+new("TextLabel", {
+    Size = UDim2.new(1, -150, 1, 0), Position = UDim2.fromOffset(14, 0), BackgroundTransparency = 1,
+    Text = "🌸 SAKURA • Pull A Lucky Fish", Font = Enum.Font.GothamBold, TextSize = 13,
+    TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
+}, TopBar)
+
+local function topButton(text, xOffset)
+    local b = new("TextButton", {
+        Size = UDim2.fromOffset(26, 26), Position = UDim2.new(1, xOffset, 0.5, -13),
+        BackgroundColor3 = Theme.CardSub, Text = text, Font = Enum.Font.GothamBold, TextSize = 12,
+        TextColor3 = Theme.AccentSoft, AutoButtonColor = false,
+    }, TopBar)
+    corner(b, 6)
+    return b
+end
+local CloseBtn = topButton("✕", -34)
+local MinBtn = topButton("—", -66)
+
+local FloatBtn = new("TextButton", {
+    Size = UDim2.fromOffset(46, 46), AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromOffset(40, vp.Y / 2), BackgroundColor3 = Theme.Background,
+    Text = "🌸", TextSize = 22, Visible = false, Active = true, AutoButtonColor = false,
+}, ScreenGui)
+corner(FloatBtn, 23)
+stroke(FloatBtn, Theme.Accent, 1.6)
+
+local function makeDraggable(handle, target, onClick)
+    local dragging, moved, dragStart, startPos = false, false, nil, nil
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, moved = true, false
+            dragStart = input.Position
+            startPos = Vector2.new(target.Position.X.Offset, target.Position.Y.Offset)
+            local c
+            c = input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    c:Disconnect()
+                    if not moved and onClick then onClick() end
                 end
             end)
-            task.wait(0.85)
-        end
-        if savedCFrame and hrp and hrp.Parent then
-            hrp.CFrame = savedCFrame
-            task.wait(0.2)
         end
     end)
-    isAuctionBusy = false
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            if d.Magnitude > 5 then moved = true end
+            local v = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or vp
+            target.Position = UDim2.fromOffset(
+                math.clamp(startPos.X + d.X, 30, v.X - 30),
+                math.clamp(startPos.Y + d.Y, 30, v.Y - 30))
+        end
+    end))
 end
 
-local function processOpenReadyItems()
-    if not Config.AutoOpen then return end
-    local s = getState()
-    local placedEggs = s.placedEggs or {}
-    for eggId, data in pairs(placedEggs) do
-        if isTimerFinished(eggId, data, "Egg") then
-            if Remotes.HatchEgg then
-                if Remotes.HatchEgg.Call then
-                    pcall(function() Remotes.HatchEgg:Call(eggId):Await() end)
-                    pcall(function() Remotes.HatchEgg:Call(tostring(eggId)):Await() end)
-                end
-                if Remotes.HatchEgg.Fire then
-                    pcall(function() Remotes.HatchEgg:Fire(eggId) end)
-                    pcall(function() Remotes.HatchEgg:Fire(tostring(eggId)) end)
-                end
-            end
-            task.wait(0.2)
-        end
-    end
-    local placedBoxes = s.placedLootboxes or {}
-    for boxId, data in pairs(placedBoxes) do
-        if isTimerFinished(boxId, data, "Box") then
-            if Remotes.OpenFloatLootbox then
-                if Remotes.OpenFloatLootbox.Call then
-                    pcall(function() Remotes.OpenFloatLootbox:Call(boxId):Await() end)
-                    pcall(function() Remotes.OpenFloatLootbox:Call(tostring(boxId)):Await() end)
-                end
-                if Remotes.OpenFloatLootbox.Fire then
-                    pcall(function() Remotes.OpenFloatLootbox:Fire(boxId) end)
-                    pcall(function() Remotes.OpenFloatLootbox:Fire(tostring(boxId)) end)
-                end
-            end
-            fireRemote(Remotes.ClaimFloatLootboxReward, boxId)
-            task.wait(0.2)
-        end
-    end
-    local base = findPlayerBase()
-    if base and fireproximityprompt then
-        for _, desc in ipairs(base:GetDescendants()) do
-            if desc:IsA("ProximityPrompt") and desc.Enabled then
-                local act = tostring(desc.ActionText):lower()
-                if act:find("open") or act:find("hatch") or act:find("claim") then
-                    triggerPrompt(desc)
-                end
-            end
-        end
-    end
+local function setUIVisible(visible)
+    Main.Visible = visible
+    FloatBtn.Visible = not visible
 end
-
-local RarityScore = {
-    ["MythicFloatCrate"] = 100,
-    ["OceanEgg"] = 90,
-    ["LegendaryFloatCrate"] = 80,
-    ["EpicFloatCrate"] = 70,
-    ["ForestEgg"] = 60,
-    ["RareFloatCrate"] = 50,
-    ["FarmEgg"] = 40,
-    ["CommonFloatCrate"] = 30,
-    ["FunctionalObjectsCrate"] = 25,
-    ["CatFloatCrate"] = 20
-}
-
-local lastPlaceTime = 0
-local function processPlaceItemsIfSpace()
-    if not Config.AutoPlace then return end
-    if os.clock() - lastPlaceTime < 1.4 then return end
-    local hasSpace = hasSpaceToPlace()
-    if not hasSpace then return end
-    local freeSlot = getFreeBaseSlot()
-    local s = getState()
-    local inv = s.inventory or {}
-    local candidates = {}
-    for key, item in pairs(inv) do
-        if type(item) == "table" then
-            local name = item.ConfigName or tostring(key)
-            local count = tonumber(item.Stack) or 1
-            if count > 0 then
-                local isEgg = (item.Category == "Egg") or name:find("Egg")
-                local isBox = (item.Category == "FloatLootbox") or name:find("Crate") or name:find("Lootbox")
-                if isEgg and name ~= "MythicEgg" then
-                    table.insert(candidates, { Name = name, Type = "Egg", Score = RarityScore[name] or 35 })
-                elseif isBox then
-                    table.insert(candidates, { Name = name, Type = "Box", Score = RarityScore[name] or 25 })
-                end
-            end
-        end
-    end
-    if #candidates == 0 then return end
-    if Config.OpenPriority == "HighTierFirst" then
-        table.sort(candidates, function(a, b) return a.Score > b.Score end)
-    elseif Config.OpenPriority == "EggsFirst" then
-        table.sort(candidates, function(a, b)
-            if a.Type == b.Type then return a.Score > b.Score end
-            return a.Type == "Egg"
-        end)
-    elseif Config.OpenPriority == "BoxesFirst" then
-        table.sort(candidates, function(a, b)
-            if a.Type == b.Type then return a.Score > b.Score end
-            return a.Type == "Box"
-        end)
-    end
-    local chosen = candidates[1]
-    lastPlaceTime = os.clock()
-    local char = LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local baseCf = getBaseCFrame()
-    local savedCFrame = nil
-    if baseCf and hrp then
-        local dist = (hrp.Position - baseCf.Position).Magnitude
-        if dist > 12 then
-            savedCFrame = hrp.CFrame
-            hrp.CFrame = baseCf + Vector3.new(0, 3, 0)
-            task.wait(0.4)
-        end
-    end
-    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-    if backpack and char then
-        local tool = backpack:FindFirstChild(chosen.Name)
-        if tool and tool:IsA("Tool") then
-            pcall(function() tool.Parent = char end)
-            task.wait(0.2)
-        end
-    end
-    if baseCf then
-        for _, desc in ipairs(workspace:GetDescendants()) do
-            if desc:IsA("ProximityPrompt") and desc.Enabled then
-                local pPos = desc.Parent and getPartCFrame(desc.Parent)
-                if pPos and (pPos.Position - baseCf.Position).Magnitude <= 30 then
-                    local act = tostring(desc.ActionText):lower()
-                    local obj = tostring(desc.ObjectText):lower()
-                    if act:find("place") or act:find("put") or act:find("add") or act:find("incub") or
-                       obj:find("egg") or obj:find("crate") or obj:find("lootbox") or obj:find("stand") then
-                        triggerPrompt(desc)
-                        task.wait(0.1)
-                    end
-                end
-            end
-        end
-    end
-    if chosen.Type == "Egg" then
-        local remote = Remotes.PlaceEgg
-        if remote then
-            if remote.Call then
-                pcall(function() remote:Call(chosen.Name, freeSlot):Await() end)
-                pcall(function() remote:Call(freeSlot, chosen.Name):Await() end)
-                pcall(function() remote:Call(chosen.Name):Await() end)
-                pcall(function() remote:Call({ ConfigName = chosen.Name, Slot = freeSlot }):Await() end)
-                pcall(function() remote:Call({ ConfigName = chosen.Name }):Await() end)
-            end
-            if remote.Fire then
-                pcall(function() remote:Fire(chosen.Name, freeSlot) end)
-                pcall(function() remote:Fire(freeSlot, chosen.Name) end)
-                pcall(function() remote:Fire(chosen.Name) end)
-                pcall(function() remote:Fire({ ConfigName = chosen.Name, Slot = freeSlot }) end)
-            end
-        end
-    else
-        local remote = Remotes.PlaceFloatLootbox
-        if remote then
-            if remote.Call then
-                pcall(function() remote:Call(chosen.Name, freeSlot):Await() end)
-                pcall(function() remote:Call(freeSlot, chosen.Name):Await() end)
-                pcall(function() remote:Call(chosen.Name):Await() end)
-                pcall(function() remote:Call({ ConfigName = chosen.Name, Slot = freeSlot }):Await() end)
-                pcall(function() remote:Call({ ConfigName = chosen.Name }):Await() end)
-            end
-            if remote.Fire then
-                pcall(function() remote:Fire(chosen.Name, freeSlot) end)
-                pcall(function() remote:Fire(freeSlot, chosen.Name) end)
-                pcall(function() remote:Fire(chosen.Name) end)
-                pcall(function() remote:Fire({ ConfigName = chosen.Name, Slot = freeSlot }) end)
-            end
-        end
-        fireRemote(Remotes.OpenLuckyblock, chosen.Name)
-    end
-    task.wait(0.3)
-    if savedCFrame and hrp and hrp.Parent then
-        hrp.CFrame = savedCFrame
-        task.wait(0.2)
-    end
-end
-
-table.insert(connections, LocalPlayer.Idled:Connect(function()
-    if Config.AntiAFK and VirtualUser then
-        pcall(function()
-            VirtualUser:CaptureController()
-            VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
-            task.wait(1)
-            VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
-        end)
-    end
+makeDraggable(TopBar, Main)
+makeDraggable(FloatBtn, FloatBtn, function() setUIVisible(true) end)
+MinBtn.MouseButton1Click:Connect(function() setUIVisible(false) end)
+CloseBtn.MouseButton1Click:Connect(shutdown)
+track(UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe or not alive() then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then setUIVisible(not Main.Visible) end
 end))
 
-task.spawn(function()
-    local auctionTimer = 0
-    while isRunning and _G.__SAKURA_MAIN == CURRENT_SESSION do
-        if Config.AutoCollectCash then pcall(collectCash) end
-        if Config.AutoBuyEggs then pcall(buyEggs) end
-        if Config.AutoBuyBoxes then pcall(buyBoxes) end
-        pcall(processOpenReadyItems)
-        pcall(processPlaceItemsIfSpace)
-        auctionTimer = auctionTimer + 1.5
-        if auctionTimer >= 60 then
-            auctionTimer = 0
-            if Config.AutoBuyAuctionHouse then pcall(buyAuctionHouseDirect) end
-        end
-        task.wait(1.5)
-    end
-end)
-
-local Theme = {
-    Background = Color3.fromRGB(18, 14, 22),
-    Sidebar    = Color3.fromRGB(24, 18, 28),
-    Card       = Color3.fromRGB(28, 21, 33),
-    CardSub    = Color3.fromRGB(38, 28, 45),
-    CardActive = Color3.fromRGB(50, 36, 60),
-    Accent     = Color3.fromRGB(255, 107, 139),
-    AccentSoft = Color3.fromRGB(255, 180, 200),
-    AccentGlow = Color3.fromRGB(255, 140, 168),
-    Text       = Color3.fromRGB(255, 245, 248),
-    TextDim    = Color3.fromRGB(200, 168, 185),
-    Green      = Color3.fromRGB(115, 230, 155),
-    Red        = Color3.fromRGB(255, 95, 120),
-    Stroke     = Color3.fromRGB(255, 107, 139),
-    StrokeSub  = Color3.fromRGB(60, 44, 68)
-}
-
-local targetParent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "SakuraLuckyFish_Main"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent = targetParent
-
-table.insert(connections, ScreenGui.Destroying:Connect(cleanShutdown))
-
-local Main = Instance.new("Frame")
-Main.Name = "SakuraMain"
-Main.Size = UDim2.new(0, 580, 0, 430)
-Main.Position = UDim2.new(0.5, -290, 0.5, -215)
-Main.BackgroundColor3 = Theme.Background
-Main.BorderSizePixel = 0
-Main.Active = true
-Main.ClipsDescendants = true
-Main.Parent = ScreenGui
-
-local MainCorner = Instance.new("UICorner")
-MainCorner.CornerRadius = UDim.new(0, 14)
-MainCorner.Parent = Main
-
-local MainStroke = Instance.new("UIStroke")
-MainStroke.Color = Theme.Stroke
-MainStroke.Thickness = 1.4
-MainStroke.Parent = Main
-
-local dragging, dragStart, startPos
-table.insert(connections, Main.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        startPos = Main.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then dragging = false end
-        end)
-    end
-end))
-
-table.insert(connections, UserInputService.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-        local delta = input.Position - dragStart
-        local camera = workspace.CurrentCamera
-        local vp = camera and camera.ViewportSize or Vector2.new(1920, 1080)
-        local newX = math.clamp(startPos.X.Offset + delta.X, -vp.X * 0.5 + 20, vp.X * 0.5 - 20)
-        local newY = math.clamp(startPos.Y.Offset + delta.Y, -vp.Y * 0.5 + 20, vp.Y * 0.5 - 20)
-        Main.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
-    end
-end))
-
-local TopBar = Instance.new("Frame")
-TopBar.Size = UDim2.new(1, 0, 0, 42)
-TopBar.BackgroundColor3 = Theme.Sidebar
-TopBar.BorderSizePixel = 0
-TopBar.Parent = Main
-
-local TopCorner = Instance.new("UICorner")
-TopCorner.CornerRadius = UDim.new(0, 14)
-TopCorner.Parent = TopBar
-
-local TopTitle = Instance.new("TextLabel")
-TopTitle.Size = UDim2.new(1, -140, 1, 0)
-TopTitle.Position = UDim2.new(0, 16, 0, 0)
-TopTitle.BackgroundTransparency = 1
-TopTitle.Text = "🌸 SAKURA • Pull A Lucky Fish"
-TopTitle.Font = Enum.Font.GothamBold
-TopTitle.TextSize = 13
-TopTitle.TextColor3 = Theme.Text
-TopTitle.TextXAlignment = Enum.TextXAlignment.Left
-TopTitle.Parent = TopBar
-
-local StatusPill = Instance.new("Frame")
-StatusPill.Size = UDim2.new(0, 70, 0, 22)
-StatusPill.Position = UDim2.new(1, -156, 0.5, -11)
-StatusPill.BackgroundColor3 = Theme.CardSub
-StatusPill.Parent = TopBar
-
-local StatusCorner = Instance.new("UICorner")
-StatusCorner.CornerRadius = UDim.new(1, 0)
-StatusCorner.Parent = StatusPill
-
-local StatusDot = Instance.new("Frame")
-StatusDot.Size = UDim2.new(0, 6, 0, 6)
-StatusDot.Position = UDim2.new(0, 8, 0.5, -3)
-StatusDot.BackgroundColor3 = Theme.Green
-StatusDot.BorderSizePixel = 0
-StatusDot.Parent = StatusPill
-
-local StatusDotCorner = Instance.new("UICorner")
-StatusDotCorner.CornerRadius = UDim.new(1, 0)
-StatusDotCorner.Parent = StatusDot
-
-local StatusText = Instance.new("TextLabel")
-StatusText.Size = UDim2.new(1, -18, 1, 0)
-StatusText.Position = UDim2.new(0, 18, 0, 0)
-StatusText.BackgroundTransparency = 1
-StatusText.Text = "ACTIVE"
-StatusText.Font = Enum.Font.GothamBold
-StatusText.TextSize = 9
-StatusText.TextColor3 = Theme.Green
-StatusText.TextXAlignment = Enum.TextXAlignment.Left
-StatusText.Parent = StatusPill
-
-local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.new(0, 26, 0, 26)
-CloseBtn.Position = UDim2.new(1, -34, 0.5, -13)
-CloseBtn.BackgroundColor3 = Theme.CardSub
-CloseBtn.Text = "✕"
-CloseBtn.Font = Enum.Font.GothamBold
-CloseBtn.TextSize = 11
-CloseBtn.TextColor3 = Theme.AccentSoft
-CloseBtn.AutoButtonColor = false
-CloseBtn.Parent = TopBar
-local CloseCorner = Instance.new("UICorner")
-CloseCorner.CornerRadius = UDim.new(0, 6)
-CloseCorner.Parent = CloseBtn
-CloseBtn.MouseButton1Click:Connect(cleanShutdown)
-
-local MinBtn = Instance.new("TextButton")
-MinBtn.Size = UDim2.new(0, 26, 0, 26)
-MinBtn.Position = UDim2.new(1, -66, 0.5, -13)
-MinBtn.BackgroundColor3 = Theme.CardSub
-MinBtn.Text = "—"
-MinBtn.Font = Enum.Font.GothamBold
-MinBtn.TextSize = 11
-MinBtn.TextColor3 = Theme.AccentSoft
-MinBtn.AutoButtonColor = false
-MinBtn.Parent = TopBar
-local MinCorner = Instance.new("UICorner")
-MinCorner.CornerRadius = UDim.new(0, 6)
-MinCorner.Parent = MinBtn
-
-local FloatBtn = Instance.new("TextButton")
-FloatBtn.Size = UDim2.new(0, 44, 0, 44)
-FloatBtn.Position = UDim2.new(0, 16, 0.5, -22)
-FloatBtn.BackgroundColor3 = Theme.Background
-FloatBtn.Text = "🌸"
-FloatBtn.TextSize = 22
-FloatBtn.Visible = false
-FloatBtn.Active = true
-FloatBtn.Parent = ScreenGui
-
-local FloatCorner = Instance.new("UICorner")
-FloatCorner.CornerRadius = UDim.new(1, 0)
-FloatCorner.Parent = FloatBtn
-
-local FloatStroke = Instance.new("UIStroke")
-FloatStroke.Color = Theme.Accent
-FloatStroke.Thickness = 1.6
-FloatStroke.Parent = FloatBtn
-
-local fDragging, fDragStart, fStartPos
-table.insert(connections, FloatBtn.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        fDragging = true
-        fDragStart = input.Position
-        fStartPos = FloatBtn.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then fDragging = false end
-        end)
-    end
-end))
-
-table.insert(connections, UserInputService.InputChanged:Connect(function(input)
-    if fDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-        local delta = input.Position - fDragStart
-        FloatBtn.Position = UDim2.new(fStartPos.X.Scale, fStartPos.X.Offset + delta.X, fStartPos.Y.Scale, fStartPos.Y.Offset + delta.Y)
-    end
-end))
-
-local function toggleUI(visible)
-    if visible == nil then visible = not Main.Visible end
-    if visible then
-        FloatBtn.Visible = false
-        Main.Visible = true
-        Main.Size = UDim2.new(0, 500, 0, 370)
-        TweenService:Create(Main, TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-            Size = UDim2.new(0, 580, 0, 430)
-        }):Play()
-    else
-        local tween = TweenService:Create(Main, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            Size = UDim2.new(0, 500, 0, 370)
-        })
-        tween:Play()
-        tween.Completed:Connect(function()
-            if not Main.Visible then return end
-            Main.Visible = false
-            FloatBtn.Visible = true
-        end)
-    end
-end
-
-FloatBtn.MouseButton1Click:Connect(function() toggleUI(true) end)
-MinBtn.MouseButton1Click:Connect(function() toggleUI(false) end)
-
-table.insert(connections, UserInputService.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    if input.KeyCode == Enum.KeyCode.RightShift then
-        toggleUI()
-    end
-end))
-
-local Toast = Instance.new("Frame")
-Toast.Size = UDim2.new(0, 240, 0, 28)
-Toast.Position = UDim2.new(0.5, -120, 1, -38)
-Toast.BackgroundColor3 = Theme.CardActive
-Toast.BorderSizePixel = 0
-Toast.Visible = false
-Toast.ZIndex = 10
-Toast.Parent = Main
-
-local ToastCorner = Instance.new("UICorner")
-ToastCorner.CornerRadius = UDim.new(0, 8)
-ToastCorner.Parent = Toast
-
-local ToastStroke = Instance.new("UIStroke")
-ToastStroke.Color = Theme.Accent
-ToastStroke.Thickness = 1
-ToastStroke.Parent = Toast
-
-local ToastLabel = Instance.new("TextLabel")
-ToastLabel.Size = UDim2.new(1, 0, 1, 0)
-ToastLabel.BackgroundTransparency = 1
-ToastLabel.Font = Enum.Font.GothamSemibold
-ToastLabel.TextSize = 11
-ToastLabel.TextColor3 = Theme.Text
-ToastLabel.ZIndex = 11
-ToastLabel.Parent = Toast
-
-local toastThread
+-- Toast
+local Toast = new("Frame", {
+    AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -24), Size = UDim2.fromOffset(260, 30),
+    BackgroundColor3 = Theme.CardActive, BorderSizePixel = 0, Visible = false, ZIndex = 20,
+}, ScreenGui)
+corner(Toast, 8)
+stroke(Toast, Theme.Accent, 1)
+local ToastLabel = new("TextLabel", {
+    Size = UDim2.new(1, -10, 1, 0), Position = UDim2.fromOffset(5, 0), BackgroundTransparency = 1,
+    Font = Enum.Font.GothamSemibold, TextSize = 11, TextColor3 = Theme.Text, ZIndex = 21, TextTruncate = Enum.TextTruncate.AtEnd,
+}, Toast)
+local toastToken = 0
 local function notify(msg)
-    if toastThread then task.cancel(toastThread) end
-    toastThread = task.spawn(function()
-        ToastLabel.Text = msg
-        Toast.Position = UDim2.new(0.5, -120, 1, -20)
-        Toast.BackgroundTransparency = 1
-        ToastLabel.TextTransparency = 1
-        Toast.Visible = true
-        TweenService:Create(Toast, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-            Position = UDim2.new(0.5, -120, 1, -38),
-            BackgroundTransparency = 0
-        }):Play()
-        TweenService:Create(ToastLabel, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-            TextTransparency = 0
-        }):Play()
-        task.wait(1.6)
-        local out = TweenService:Create(Toast, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            Position = UDim2.new(0.5, -120, 1, -20),
-            BackgroundTransparency = 1
-        })
-        TweenService:Create(ToastLabel, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            TextTransparency = 1
-        }):Play()
-        out:Play()
-        out.Completed:Connect(function()
-            Toast.Visible = false
-        end)
+    toastToken += 1
+    local mine = toastToken
+    ToastLabel.Text = msg
+    Toast.Visible = true
+    task.delay(2, function()
+        if toastToken == mine and Toast.Parent then Toast.Visible = false end
     end)
 end
 
-local Sidebar = Instance.new("Frame")
-Sidebar.Size = UDim2.new(0, 144, 1, -50)
-Sidebar.Position = UDim2.new(0, 8, 0, 46)
-Sidebar.BackgroundColor3 = Theme.Sidebar
-Sidebar.BorderSizePixel = 0
-Sidebar.Parent = Main
+-- Sidebar / pages
+local Sidebar = new("Frame", {
+    Size = UDim2.new(0, SIDE_W, 1, -52), Position = UDim2.fromOffset(8, 46),
+    BackgroundColor3 = Theme.Sidebar, BorderSizePixel = 0,
+}, Main)
+corner(Sidebar, 10)
+new("UIListLayout", { Padding = UDim.new(0, 6) }, Sidebar)
+new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, Sidebar)
 
-local SideCorner = Instance.new("UICorner")
-SideCorner.CornerRadius = UDim.new(0, 10)
-SideCorner.Parent = Sidebar
+local Container = new("Frame", {
+    Size = UDim2.new(1, -(SIDE_W + 24), 1, -52), Position = UDim2.fromOffset(SIDE_W + 16, 46),
+    BackgroundTransparency = 1,
+}, Main)
 
-local SideLayout = Instance.new("UIListLayout")
-SideLayout.Padding = UDim.new(0, 6)
-SideLayout.Parent = Sidebar
-
-local SidePad = Instance.new("UIPadding")
-SidePad.PaddingTop = UDim.new(0, 8)
-SidePad.PaddingLeft = UDim.new(0, 6)
-SidePad.PaddingRight = UDim.new(0, 6)
-SidePad.Parent = Sidebar
-
-local Container = Instance.new("Frame")
-Container.Size = UDim2.new(1, -168, 1, -50)
-Container.Position = UDim2.new(0, 160, 0, 46)
-Container.BackgroundTransparency = 1
-Container.Parent = Main
-
-local Tabs = {}
-local TabBtns = {}
+local Pages, TabButtons = {}, {}
+local function showTab(id)
+    for tid, page in pairs(Pages) do
+        local on = tid == id
+        page.Visible = on
+        local b = TabButtons[tid]
+        b.btn.BackgroundColor3 = on and Theme.CardActive or Theme.Card
+        b.btn.TextColor3 = on and Theme.AccentSoft or Theme.TextDim
+        b.stroke.Transparency = on and 0 or 0.8
+    end
+end
 
 local function createTab(id, title)
-    local page = Instance.new("ScrollingFrame")
-    page.Name = "Page_" .. id
-    page.Size = UDim2.new(1, 0, 1, 0)
-    page.BackgroundTransparency = 1
-    page.BorderSizePixel = 0
-    page.ScrollBarThickness = 3
-    page.ScrollBarImageColor3 = Theme.Accent
-    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    page.Visible = false
-    page.Parent = Container
-
-    local pageLayout = Instance.new("UIListLayout")
-    pageLayout.Padding = UDim.new(0, 8)
-    pageLayout.Parent = page
-
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 34)
-    btn.BackgroundColor3 = Theme.Card
-    btn.Text = title
-    btn.Font = Enum.Font.GothamSemibold
-    btn.TextSize = 11
-    btn.TextColor3 = Theme.TextDim
-    btn.AutoButtonColor = false
-    btn.Parent = Sidebar
-
-    local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 8)
-    btnCorner.Parent = btn
-
-    local btnStroke = Instance.new("UIStroke")
-    btnStroke.Color = Theme.Accent
-    btnStroke.Thickness = 0.8
-    btnStroke.Transparency = 0.8
-    btnStroke.Parent = btn
-
-    Tabs[id] = page
-    TabBtns[id] = { Button = btn, Stroke = btnStroke }
-
-    btn.MouseButton1Click:Connect(function()
-        for tId, p in pairs(Tabs) do
-            local isTarget = (tId == id)
-            p.Visible = isTarget
-            local b = TabBtns[tId]
-            if isTarget then
-                TweenService:Create(b.Button, TweenInfo.new(0.18), { BackgroundColor3 = Theme.CardActive, TextColor3 = Theme.AccentSoft }):Play()
-                TweenService:Create(b.Stroke, TweenInfo.new(0.18), { Transparency = 0 }):Play()
-            else
-                TweenService:Create(b.Button, TweenInfo.new(0.18), { BackgroundColor3 = Theme.Card, TextColor3 = Theme.TextDim }):Play()
-                TweenService:Create(b.Stroke, TweenInfo.new(0.18), { Transparency = 0.8 }):Play()
-            end
-        end
-    end)
-
+    local page = new("ScrollingFrame", {
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+        ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Accent,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(), Visible = false,
+    }, Container)
+    new("UIListLayout", { Padding = UDim.new(0, 8) }, page)
+    local btn = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = Theme.Card, Text = title,
+        Font = Enum.Font.GothamSemibold, TextSize = 11, TextColor3 = Theme.TextDim, AutoButtonColor = false,
+    }, Sidebar)
+    corner(btn, 8)
+    local st = stroke(btn, Theme.Accent, 0.8, 0.8)
+    btn.MouseButton1Click:Connect(function() showTab(id) end)
+    Pages[id] = page
+    TabButtons[id] = { btn = btn, stroke = st }
     return page
 end
 
-local PageFarm  = createTab("Farm", "💰 Farm & Cash")
-local PageShop  = createTab("Shop", "🛍️ Shop & Auction")
-local PageOpen  = createTab("Open", "⏳ Place & Hatch")
-local PageExtra = createTab("Extra", "⚙️ Settings")
+local PageFarm = createTab("Farm", "💰 Farm")
+local PageShop = createTab("Shop", "🛍️ Boutiques")
+local PageOpen = createTab("Open", "⏳ Placer & Ouvrir")
+local PageLogs = createTab("Logs", "📜 Logs")
+local PageSettings = createTab("Settings", "⚙️ Réglages")
 
+-- Composants
 local function makeCard(parent, title)
-    local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, -6, 0, 0)
-    card.BackgroundColor3 = Theme.Card
-    card.BorderSizePixel = 0
-    card.AutomaticSize = Enum.AutomaticSize.Y
-    card.Parent = parent
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 10)
-    corner.Parent = card
-
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = Theme.StrokeSub
-    stroke.Thickness = 0.8
-    stroke.Parent = card
-
-    local pad = Instance.new("UIPadding")
-    pad.PaddingTop = UDim.new(0, 10)
-    pad.PaddingBottom = UDim.new(0, 10)
-    pad.PaddingLeft = UDim.new(0, 12)
-    pad.PaddingRight = UDim.new(0, 12)
-    pad.Parent = card
-
-    local layout = Instance.new("UIListLayout")
-    layout.Padding = UDim.new(0, 6)
-    layout.Parent = card
-
+    local card = new("Frame", {
+        Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = Theme.Card, BorderSizePixel = 0,
+    }, parent)
+    corner(card, 10)
+    stroke(card, Theme.StrokeSub, 0.8)
+    new("UIPadding", {
+        PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
+        PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12),
+    }, card)
+    new("UIListLayout", { Padding = UDim.new(0, 6) }, card)
     if title then
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, 0, 0, 16)
-        lbl.BackgroundTransparency = 1
-        lbl.Text = string.upper(title)
-        lbl.Font = Enum.Font.GothamBold
-        lbl.TextSize = 10
-        lbl.TextColor3 = Theme.AccentSoft
-        lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.Parent = card
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = string.upper(title),
+            Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Theme.AccentSoft,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, card)
     end
     return card
 end
 
-local function makeToggle(card, title, configKey, callback)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 28)
-    row.BackgroundTransparency = 1
-    row.Parent = card
+local function makeLabel(card, text, color, size, bold)
+    return new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, size + 4), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+        Text = text, Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham, TextSize = size,
+        TextColor3 = color or Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
+    }, card)
+end
 
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -48, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = title
-    lbl.Font = Enum.Font.Gotham
-    lbl.TextSize = 11
-    lbl.TextColor3 = Theme.Text
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = row
-
-    local defaultVal = Config[configKey] or false
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 40, 0, 20)
-    btn.Position = UDim2.new(1, -40, 0.5, -10)
-    btn.BackgroundColor3 = defaultVal and Theme.Accent or Theme.CardSub
-    btn.Text = ""
-    btn.AutoButtonColor = false
-    btn.Parent = row
-
-    local bCorner = Instance.new("UICorner")
-    bCorner.CornerRadius = UDim.new(1, 0)
-    bCorner.Parent = btn
-
-    local knob = Instance.new("Frame")
-    knob.Size = UDim2.new(0, 16, 0, 16)
-    knob.Position = defaultVal and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
-    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    knob.BorderSizePixel = 0
-    knob.Parent = btn
-
-    local kCorner = Instance.new("UICorner")
-    kCorner.CornerRadius = UDim.new(1, 0)
-    kCorner.Parent = knob
-
-    local val = defaultVal
-    btn.MouseButton1Click:Connect(function()
-        val = not val
-        Config[configKey] = val
+local function makeToggle(card, title, key, onChange)
+    local row = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1 }, card)
+    new("TextLabel", {
+        Size = UDim2.new(1, -50, 1, 0), BackgroundTransparency = 1, Text = title, Font = Enum.Font.Gotham,
+        TextSize = 11, TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
+    }, row)
+    local trackBtn = new("TextButton", {
+        Size = UDim2.fromOffset(40, 20), Position = UDim2.new(1, -40, 0.5, -10), Text = "", AutoButtonColor = false,
+    }, row)
+    corner(trackBtn, 10)
+    local knob = new("Frame", {
+        Size = UDim2.fromOffset(16, 16), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+    }, trackBtn)
+    corner(knob, 8)
+    local function render(animate)
+        local on = Config[key] == true
+        local color = on and Theme.Accent or Theme.CardSub
+        local pos = on and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+        if animate then
+            local info = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+            TweenService:Create(trackBtn, info, { BackgroundColor3 = color }):Play()
+            TweenService:Create(knob, info, { Position = pos }):Play()
+        else
+            trackBtn.BackgroundColor3 = color
+            knob.Position = pos
+        end
+    end
+    trackBtn.MouseButton1Click:Connect(function()
+        Config[key] = not Config[key]
+        render(true)
         saveSettings()
-        local targetColor = val and Theme.Accent or Theme.CardSub
-        local targetPos = val and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
-        TweenService:Create(btn, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = targetColor }):Play()
-        TweenService:Create(knob, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Position = targetPos }):Play()
-        if callback then callback(val) end
-        notify(title .. ": " .. (val and "ON" or "OFF"))
+        notify(title .. " : " .. (Config[key] and "ON" or "OFF"))
+        if onChange then task.spawn(onChange, Config[key]) end
     end)
-    return row
+    render(false)
 end
 
 local function makeButton(card, text, onClick)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 30)
-    btn.BackgroundColor3 = Theme.CardSub
-    btn.Text = text
-    btn.Font = Enum.Font.GothamSemibold
-    btn.TextSize = 11
-    btn.TextColor3 = Theme.Text
-    btn.AutoButtonColor = false
-    btn.Parent = card
-
-    local bCorner = Instance.new("UICorner")
-    bCorner.CornerRadius = UDim.new(0, 8)
-    bCorner.Parent = btn
-
-    local bStroke = Instance.new("UIStroke")
-    bStroke.Color = Theme.Accent
-    bStroke.Thickness = 0.8
-    bStroke.Transparency = 0.6
-    bStroke.Parent = btn
-
+    local btn = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = Theme.CardSub, Text = text,
+        Font = Enum.Font.GothamSemibold, TextSize = 11, TextColor3 = Theme.Text, AutoButtonColor = false,
+    }, card)
+    corner(btn, 8)
+    local st = stroke(btn, Theme.Accent, 0.8, 0.6)
     btn.MouseEnter:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = Theme.CardActive }):Play()
-        TweenService:Create(bStroke, TweenInfo.new(0.15), { Transparency = 0.2 }):Play()
+        TweenService:Create(btn, TweenInfo.new(0.12), { BackgroundColor3 = Theme.CardActive }):Play()
+        st.Transparency = 0.2
     end)
     btn.MouseLeave:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = Theme.CardSub }):Play()
-        TweenService:Create(bStroke, TweenInfo.new(0.15), { Transparency = 0.6 }):Play()
+        TweenService:Create(btn, TweenInfo.new(0.12), { BackgroundColor3 = Theme.CardSub }):Play()
+        st.Transparency = 0.6
     end)
-
-    btn.MouseButton1Click:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.1), { BackgroundColor3 = Theme.Accent }):Play()
-        task.wait(0.1)
-        TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = Theme.CardActive }):Play()
-        onClick()
-    end)
+    btn.MouseButton1Click:Connect(function() task.spawn(onClick) end)
     return btn
 end
 
-local BalanceCard = makeCard(PageFarm, "Live Balance")
-local BalLabel = Instance.new("TextLabel")
-BalLabel.Size = UDim2.new(1, 0, 0, 20)
-BalLabel.BackgroundTransparency = 1
-BalLabel.Font = Enum.Font.GothamBold
-BalLabel.TextSize = 13
-BalLabel.TextColor3 = Theme.Green
-BalLabel.TextXAlignment = Enum.TextXAlignment.Left
-BalLabel.Text = "💰 Cash: Loading..."
-BalLabel.Parent = BalanceCard
-
-local CashAutoCard = makeCard(PageFarm, "Auto Cash Collection")
-makeToggle(CashAutoCard, "Auto Collect Cash (All Base Slots)", "AutoCollectCash")
-makeButton(CashAutoCard, "⚡ Force Collect Now", function()
-    collectCash()
-    notify("Collected cash from all slots!")
-end)
-
-local EggCard = makeCard(PageShop, "Egg Shop (Skips Mythic Robux)")
-makeToggle(EggCard, "Auto Buy Eggs in Stock", "AutoBuyEggs")
-local EggStockLabel = Instance.new("TextLabel")
-EggStockLabel.Size = UDim2.new(1, 0, 0, 16)
-EggStockLabel.BackgroundTransparency = 1
-EggStockLabel.Font = Enum.Font.Gotham
-EggStockLabel.TextSize = 10
-EggStockLabel.TextColor3 = Theme.TextDim
-EggStockLabel.TextXAlignment = Enum.TextXAlignment.Left
-EggStockLabel.Text = "Stock: Scanning..."
-EggStockLabel.Parent = EggCard
-
-local BoxCard = makeCard(PageShop, "Box Shop (Floats & Functional Crates)")
-makeToggle(BoxCard, "Auto Buy Boxes & Functional Crates", "AutoBuyBoxes")
-local BoxStockLabel = Instance.new("TextLabel")
-BoxStockLabel.Size = UDim2.new(1, 0, 0, 16)
-BoxStockLabel.BackgroundTransparency = 1
-BoxStockLabel.Font = Enum.Font.Gotham
-BoxStockLabel.TextSize = 10
-BoxStockLabel.TextColor3 = Theme.TextDim
-BoxStockLabel.TextXAlignment = Enum.TextXAlignment.Left
-BoxStockLabel.Text = "Stock: Scanning..."
-BoxStockLabel.Parent = BoxCard
-
-local AuctionCard = makeCard(PageShop, "Auction House (1-Hour Direct Buy, No Bids)")
-makeToggle(AuctionCard, "Auto Buy Hourly Direct-Buy Items", "AutoBuyAuctionHouse", function(v)
-    if v then task.spawn(buyAuctionHouseDirect) end
-end)
-local AuctionStatusLabel = Instance.new("TextLabel")
-AuctionStatusLabel.Size = UDim2.new(1, 0, 0, 16)
-AuctionStatusLabel.BackgroundTransparency = 1
-AuctionStatusLabel.Font = Enum.Font.Gotham
-AuctionStatusLabel.TextSize = 10
-AuctionStatusLabel.TextColor3 = Theme.TextDim
-AuctionStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-AuctionStatusLabel.Text = "Stock: Ready (checks hourly restock, direct buy only)"
-AuctionStatusLabel.Parent = AuctionCard
-
-makeButton(AuctionCard, "⚡ Buy Auction House Stock Now", function()
-    notify("Attempting Auction House direct buy...")
-    task.spawn(buyAuctionHouseDirect)
-end)
-
-local OpenMasterCard = makeCard(PageOpen, "Automation Controls")
-makeToggle(OpenMasterCard, "Auto Place (Checks Space & Base)", "AutoPlace")
-makeToggle(OpenMasterCard, "Auto Open/Hatch (Checks Timer Finished)", "AutoOpen")
-
-local SpaceStatusCard = makeCard(PageOpen, "Base Incubation Capacity & Timers")
-local SlotStatusLabel = Instance.new("TextLabel")
-SlotStatusLabel.Size = UDim2.new(1, 0, 0, 18)
-SlotStatusLabel.BackgroundTransparency = 1
-SlotStatusLabel.Font = Enum.Font.GothamBold
-SlotStatusLabel.TextSize = 11
-SlotStatusLabel.TextColor3 = Theme.Green
-SlotStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-SlotStatusLabel.Text = "Slots: Checking base capacity..."
-SlotStatusLabel.Parent = SpaceStatusCard
-
-local TimerStatusLabel = Instance.new("TextLabel")
-TimerStatusLabel.Size = UDim2.new(1, 0, 0, 16)
-TimerStatusLabel.BackgroundTransparency = 1
-TimerStatusLabel.Font = Enum.Font.Gotham
-TimerStatusLabel.TextSize = 10
-TimerStatusLabel.TextColor3 = Theme.TextDim
-TimerStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-TimerStatusLabel.Text = "Timers: Monitoring placed items..."
-TimerStatusLabel.Parent = SpaceStatusCard
-
-makeButton(SpaceStatusCard, "⚡ Force Open Ready Items Now (Timer = 0s only)", function()
-    processOpenReadyItems()
-    notify("Checked and opened all ready items!")
-end)
-
-local PriorityCard = makeCard(PageOpen, "Placement Priority Order")
-local PriorityLabel = Instance.new("TextLabel")
-PriorityLabel.Size = UDim2.new(1, 0, 0, 18)
-PriorityLabel.BackgroundTransparency = 1
-PriorityLabel.Font = Enum.Font.GothamSemibold
-PriorityLabel.TextSize = 11
-PriorityLabel.TextColor3 = Theme.AccentSoft
-PriorityLabel.TextXAlignment = Enum.TextXAlignment.Left
-local function getPriorityTitle(p)
-    if p == "EggsFirst" then return "Eggs First" end
-    if p == "BoxesFirst" then return "Boxes First" end
-    return "High Tier First"
-end
-PriorityLabel.Text = "Current Priority: " .. getPriorityTitle(Config.OpenPriority)
-PriorityLabel.Parent = PriorityCard
-
-makeButton(PriorityCard, "⭐ Priority: High Tier First (Mythic > Rare)", function()
-    Config.OpenPriority = "HighTierFirst"
-    saveSettings()
-    PriorityLabel.Text = "Current Priority: High Tier First"
-    notify("Priority saved: High Tier First")
-end)
-makeButton(PriorityCard, "🥚 Priority: Eggs First (All Eggs > Boxes)", function()
-    Config.OpenPriority = "EggsFirst"
-    saveSettings()
-    PriorityLabel.Text = "Current Priority: Eggs First"
-    notify("Priority saved: Eggs First")
-end)
-makeButton(PriorityCard, "📦 Priority: Boxes First (All Boxes > Eggs)", function()
-    Config.OpenPriority = "BoxesFirst"
-    saveSettings()
-    PriorityLabel.Text = "Current Priority: Boxes First"
-    notify("Priority saved: Boxes First")
-end)
-
-local PrefCard = makeCard(PageExtra, "Preferences & Storage")
-makeToggle(PrefCard, "Soft Anti-AFK (VirtualUser)", "AntiAFK")
-makeButton(PrefCard, "💾 Save Settings to Workspace", function()
-    saveSettings()
-    notify("Config saved to PullALuckyFish_Config.json")
-end)
-makeButton(PrefCard, "🛑 Unload Script Cleanly", function()
-    cleanShutdown()
-end)
-
-task.spawn(function()
-    while isRunning and _G.__SAKURA_MAIN == CURRENT_SESSION do
-        pcall(function()
-            local s = getState()
-            local m = s.money or 0
-            local g = s.gems or 0
-            BalLabel.Text = string.format("💰 Cash: %s  |  💎 Gems: %s", formatNumber(m), formatNumber(g))
-
-            local eItems = s.eggShopItems or {}
-            local eSold = s.eggShopSoldSlots or {}
-            local eTxt = {}
-            for i = 1, 3 do
-                table.insert(eTxt, string.format("#%d: %s (%s)", i, eItems[i] or "-", eSold[i] and "Sold" or "Ready"))
-            end
-            EggStockLabel.Text = table.concat(eTxt, " | ")
-
-            local bItems = s.lootboxShopItems or {}
-            local bSold = s.lootboxShopSoldSlots or {}
-            local bTxt = {}
-            for i = 1, 3 do
-                table.insert(bTxt, string.format("#%d: %s (%s)", i, bItems[i] or "-", bSold[i] and "Sold" or "Ready"))
-            end
-            BoxStockLabel.Text = table.concat(bTxt, " | ")
-
-            local hasSpace, currentCount, maxLimit = hasSpaceToPlace()
-            if hasSpace then
-                SlotStatusLabel.Text = string.format("Slots: %d / %d Used  ✔ (%d Free Space)", currentCount, maxLimit, maxLimit - currentCount)
-                SlotStatusLabel.TextColor3 = Theme.Green
-            else
-                SlotStatusLabel.Text = string.format("Slots: %d / %d Full  ⛔ (No Free Space)", currentCount, maxLimit)
-                SlotStatusLabel.TextColor3 = Theme.Red
-            end
-
-            local placedEggs = s.placedEggs or {}
-            local placedBoxes = s.placedLootboxes or {}
-            local readyCount = 0
-            local runningCount = 0
-
-            for id, d in pairs(placedEggs) do
-                if isTimerFinished(id, d, "Egg") then readyCount = readyCount + 1 else runningCount = runningCount + 1 end
-            end
-            for id, d in pairs(placedBoxes) do
-                if isTimerFinished(id, d, "Box") then readyCount = readyCount + 1 else runningCount = runningCount + 1 end
-            end
-
-            TimerStatusLabel.Text = string.format("Timers: %d Still Ticking  |  %d Finished & Ready to Open", runningCount, readyCount)
-        end)
-        task.wait(1.4)
+local function makeSegment(card, options, get, set)
+    local row = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1 }, card)
+    new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, row)
+    local n, pad = #options, 4
+    local buttons = {}
+    local function refresh()
+        for id, b in pairs(buttons) do
+            local on = get() == id
+            b.BackgroundColor3 = on and Theme.Accent or Theme.CardSub
+            b.TextColor3 = on and Theme.Background or Theme.Text
+        end
     end
+    for i, opt in ipairs(options) do
+        local b = new("TextButton", {
+            Size = UDim2.new(1 / n, -(pad * (n - 1)) / n, 1, 0), LayoutOrder = i, Text = opt.label,
+            Font = Enum.Font.GothamSemibold, TextSize = 10, AutoButtonColor = false, BackgroundColor3 = Theme.CardSub,
+            TextColor3 = Theme.Text,
+        }, row)
+        corner(b, 7)
+        b.MouseButton1Click:Connect(function() set(opt.id) refresh() end)
+        buttons[opt.id] = b
+    end
+    refresh()
+end
+
+-- Page Farm
+local BalanceCard = makeCard(PageFarm, "Solde en direct")
+local BalLabel = makeLabel(BalanceCard, "💰 Cash : …", Theme.Green, 13, true)
+local StatsLabel = makeLabel(BalanceCard, "", Theme.TextDim, 10)
+
+local CashCard = makeCard(PageFarm, "Collecte automatique")
+makeToggle(CashCard, "Auto-collecte du cash", "AutoCollectCash")
+makeSegment(CashCard, {
+    { id = 3, label = "toutes les 3 s" }, { id = 5, label = "5 s" }, { id = 10, label = "10 s" },
+}, function() return Config.CollectInterval end, function(v) Config.CollectInterval = v saveSettings() end)
+local CollectStatus = makeLabel(CashCard, "", Theme.TextDim, 10)
+makeButton(CashCard, "⚡ Collecter maintenant", function()
+    collectCash()
+    notify("Collecte envoyée")
 end)
 
-Tabs["Farm"].Visible = true
-TweenService:Create(TabBtns["Farm"].Button, TweenInfo.new(0.18), { BackgroundColor3 = Theme.CardActive, TextColor3 = Theme.AccentSoft }):Play()
-TweenService:Create(TabBtns["Farm"].Stroke, TweenInfo.new(0.18), { Transparency = 0 }):Play()
+-- Page Boutiques
+local EggCard = makeCard(PageShop, "Boutique d'œufs (ignore MythicEgg)")
+makeToggle(EggCard, "Auto-achat des œufs en stock", "AutoBuyEggs")
+local EggLabel = makeLabel(EggCard, "", Theme.TextDim, 10)
+
+local BoxCard = makeCard(PageShop, "Boutique de caisses flottantes")
+makeToggle(BoxCard, "Auto-achat des caisses en stock", "AutoBuyBoxes")
+local BoxLabel = makeLabel(BoxCard, "", Theme.TextDim, 10)
+
+local DecoCard = makeCard(PageShop, "Boutique déco")
+makeToggle(DecoCard, "Auto-achat des Functional Objects Crate", "AutoBuyDecoCrate")
+local DecoLabel = makeLabel(DecoCard, "", Theme.TextDim, 10)
+
+local AuctionCard = makeCard(PageShop, "Auction House (achat direct, sans enchères)")
+makeToggle(AuctionCard, "Auto-achat toutes les 60 s", "AutoBuyAuction", function(v)
+    if v then buyAuction(false) end
+end)
+local AuctionLabel = makeLabel(AuctionCard, "", Theme.TextDim, 10)
+makeButton(AuctionCard, "⚡ Acheter maintenant", function()
+    notify("Tentative d'achat Auction House…")
+    buyAuction(true)
+end)
+
+-- Page Placer & Ouvrir
+local AutoCard = makeCard(PageOpen, "Automatisation")
+makeToggle(AutoCard, "Auto-placer (vérifie la place disponible)", "AutoPlace")
+makeToggle(AutoCard, "Auto-ouvrir / éclore (timer terminé)", "AutoOpen")
+local SlotLabel = makeLabel(AutoCard, "", Theme.Green, 11, true)
+local TimerLabel = makeLabel(AutoCard, "", Theme.TextDim, 10)
+local ActionLabel = makeLabel(AutoCard, "", Theme.TextDim, 10)
+makeButton(AutoCard, "⚡ Ouvrir les items prêts maintenant", function()
+    processOpen(true)
+    notify("Items prêts traités")
+end)
+
+local PrioCard = makeCard(PageOpen, "Priorité de placement")
+makeSegment(PrioCard, {
+    { id = "HighTierFirst", label = "⭐ Rareté" },
+    { id = "EggsFirst", label = "🥚 Œufs" },
+    { id = "BoxesFirst", label = "📦 Caisses" },
+}, function() return Config.OpenPriority end, function(v) Config.OpenPriority = v saveSettings() end)
+
+-- Page Logs
+local LogCard = makeCard(PageLogs, "Journal (récent en haut)")
+local LogLabel = makeLabel(LogCard, "", Theme.TextDim, 10)
+onLog = function()
+    local out = {}
+    for i = #logLines, 1, -1 do out[#out + 1] = logLines[i] end
+    LogLabel.Text = table.concat(out, "\n")
+end
+
+-- Page Réglages
+local PrefCard = makeCard(PageSettings, "Préférences")
+makeToggle(PrefCard, "Anti-AFK", "AntiAFK")
+makeToggle(PrefCard, "Autoriser la téléportation (secours placement / auction)", "AllowTeleport")
+makeButton(PrefCard, "💾 Sauvegarder les réglages", function()
+    saveSettings()
+    notify("Sauvegardé dans " .. CONFIG_FILE)
+end)
+
+local ToolCard = makeCard(PageSettings, "Outils")
+makeButton(ToolCard, "🔄 Réinitialiser l'apprentissage des remotes", function()
+    table.clear(Learned)
+    table.clear(remoteMode)
+    table.clear(failures)
+    table.clear(cooldownUntil)
+    Cash.session = nil
+    saveSettings()
+    log("Apprentissage réinitialisé")
+    notify("Apprentissage réinitialisé")
+end)
+makeButton(ToolCard, "📋 Diagnostic (console F9)", runDiagnostic)
+makeButton(ToolCard, "🛑 Décharger le script", shutdown)
+
+---------------------------------------------------------------------
+-- Rafraîchissement de l'UI
+---------------------------------------------------------------------
+local function restockText(windowKey, cfgName)
+    local s = getState()
+    local w = tonumber(s[windowKey])
+    if not w then return "?" end
+    local mod = loadConfig(cfgName)
+    local interval = (mod and tonumber(mod.ShopRefreshInterval or mod.RestockInterval)) or 1200
+    local left = math.max(0, math.floor((w + interval) - serverNow()))
+    return string.format("%d:%02d", left // 60, left % 60)
+end
+
+local function shopText(s, itemsKey, soldKey)
+    local parts = {}
+    for i = 1, 3 do
+        parts[#parts + 1] = string.format("#%d %s (%s)", i, tostring(at(s[itemsKey], i) or "-"),
+            at(s[soldKey], i) == true and "vendu" or "dispo")
+    end
+    return table.concat(parts, " | ")
+end
+
+local function refreshUI()
+    local s = getState()
+    BalLabel.Text = string.format("💰 %s   💎 %s", formatNumber(s.money), formatNumber(s.gems))
+    local stats = s.stats or {}
+    StatsLabel.Text = string.format("Poissons pêchés : %s • Rebirth : %s", formatNumber(stats.fishCaught), tostring(s.rebirthLevel or 0))
+    CollectStatus.Text = Status.collect
+
+    EggLabel.Text = shopText(s, "eggShopItems", "eggShopSoldSlots") .. "\nRestock dans " .. restockText("eggShopWindow", "EggConfig")
+    BoxLabel.Text = shopText(s, "lootboxShopItems", "lootboxShopSoldSlots") .. "\nRestock dans " .. restockText("lootboxShopWindow", "FloatLootboxConfig")
+    DecoLabel.Text = string.format("Stock : %s • Restock dans %s",
+        tostring((s.decorationsStoreStock or {}).FunctionalObjectsCrate or 0), restockText("decorationsStoreWindow", "DecorationsStoreConfig"))
+    AuctionLabel.Text = Status.auction
+
+    local count, limit = placedCount(s), placementLimit(s)
+    if count < limit then
+        SlotLabel.Text = string.format("Emplacements : %d / %d  ✔ (%d libres)", count, limit, limit - count)
+        SlotLabel.TextColor3 = Theme.Green
+    else
+        SlotLabel.Text = string.format("Emplacements : %d / %d  ⛔ complet", count, limit)
+        SlotLabel.TextColor3 = Theme.Red
+    end
+
+    local ready, running_, unknown = 0, 0, 0
+    for kind, key in pairs({ Egg = "placedEggs", Box = "placedLootboxes" }) do
+        for id, data in pairs(s[key] or {}) do
+            local r = isReady(kind, id, data)
+            if r == true then ready += 1 elseif r == false then running_ += 1 else unknown += 1 end
+        end
+    end
+    TimerLabel.Text = string.format("Timers : %d en cours • %d prêts • %d indéterminés", running_, ready, unknown)
+    ActionLabel.Text = Status.lastAction ~= "" and ("Dernière action : " .. Status.lastAction) or ""
+end
+
+---------------------------------------------------------------------
+-- Boucles (une par fonctionnalité, isolées par pcall)
+---------------------------------------------------------------------
+local function startLoop(name, interval, fn)
+    task.spawn(function()
+        local fails = 0
+        while alive() do
+            local ok, err = pcall(fn)
+            if ok then
+                fails = 0
+            else
+                fails += 1
+                log("⚠ " .. name .. " : " .. tostring(err))
+                task.wait(math.min(30, 2 ^ fails))
+            end
+            task.wait(type(interval) == "function" and interval() or interval)
+        end
+    end)
+end
+
+startLoop("Collecte", function() return math.max(2, Config.CollectInterval) end, function()
+    if Config.AutoCollectCash then collectCash() end
+end)
+
+startLoop("Boutiques", 2, function()
+    if Config.AutoBuyEggs then buyShopSlots("eggShopItems", "eggShopSoldSlots", "BuyEgg", SKIP_ITEMS) end
+    if Config.AutoBuyBoxes then buyShopSlots("lootboxShopItems", "lootboxShopSoldSlots", "BuyFloatLootbox") end
+    if Config.AutoBuyDecoCrate then buyDecoCrate() end
+end)
+
+startLoop("Placement/Ouverture", 1.5, function()
+    if Config.AutoOpen then processOpen(false) end
+    if Config.AutoPlace then placeOne() end
+end)
+
+startLoop("Auction", 5, function()
+    if Config.AutoBuyAuction and os.clock() - Auction.last >= 60 then buyAuction(false) end
+end)
+
+startLoop("Interface", 1, refreshUI)
+
+showTab("Farm")
+log("Sakura v2 chargé — RightShift pour afficher/masquer")
