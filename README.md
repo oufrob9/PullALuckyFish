@@ -1,35 +1,31 @@
-# 🌸 Pull A Lucky Fish — Sakura Automation Suite
+# 🌸 Pull A Lucky Fish — Script Suite
 
-Sleek, high-performance, single-script automation suite for **Pull A Lucky Fish** on Roblox.
+Sleek, high-performance Luau scripts for Roblox.
 
 ---
 
-## ⚡ Quick Start
+## ⚡ 1. Sakura Automation Suite
 
-Execute the script directly in your Roblox executor (Solara, Wave, Codex, Delta, Hydrogen, Arceus X, etc.):
+Complete automation for **Pull A Lucky Fish** (Auto-Collect Cash, Auto-Buy Eggs & Boxes, Auction House Direct-Buy, Smart Auto-Place & Open, Soft Anti-AFK, Config Persistence).
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/oufrob9/PullALuckyFish/main/main.luau"))()
 ```
 
-> **UI Toggle Key:** Press `RightShift` on keyboard or tap the floating 🌸 flower button on mobile/touch screens.
+> **UI Toggle Key:** `RightShift` or floating 🌸 button.
 
 ---
 
-## ✨ Features
+## 📊 2. Universal Full Game Dumper (Export to TXT)
 
-- **💰 Auto-Collect Cash**: Continuous background collection from all player base plots.
-- **🥚 Auto-Buy Eggs**: Automatically scans and purchases in-stock eggs while safely skipping Robux/Mythic items.
-- **📦 Auto-Buy Boxes**: Purchases Float Crates and Functional Objects Crates upon restock.
-- **🏷️ Auction House Direct-Buy**: Hourly direct-buy automation with proximity checks, prompt triggering, and strict action cooldown compliance (no bids).
-- **⏳ Smart Auto-Place**: Strictly verifies available incubation capacity and base proximity before placing; supports priority ordering (High Tier First, Eggs First, Boxes First).
-- **🐣 Smart Auto-Hatch / Open**: Strictly verifies timer completion (`0:00` / Ready) before opening eggs and boxes.
-- **🛡️ Soft Anti-AFK**: Integrates with `VirtualUser` to prevent the 20-minute idle disconnect without risky auto-rejoining.
-- **💾 Config Persistence**: Automatically saves and loads your preferences to/from the executor's workspace directory (`PullALuckyFish_Config.json`).
-- **🌸 Ultra-Modern UI/UX**: Custom glassmorphism Sakura theme, smooth spring/quad animations on toggles and tabs, minimizable floating pill, and safe instant teardown.
+Full game introspection dumper: scans all native & custom Remotes (Red, Knit, etc.), ModuleScripts & configs, real-time client state / inventory, Workspace entities, ProximityPrompts, and interfaces.
 
----
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/oufrob9/PullALuckyFish/main/dumper.luau"))()
+```
 
-## 🛡️ Clean Teardown
-
-Closing the UI cleanly disconnects all background threads, loops, and listeners without requiring a game rejoin or leaving memory leaks.
+> **Automatic Export:**
+> - Runs immediately upon execution.
+> - Saves directly to your executor workspace as `game_dump.txt` (e.g. `AppData\Local\Potassium\workspace\game_dump.txt`).
+> - Automatically copies the full dump to your clipboard so you can paste (`Ctrl+V`) into Notepad instantly!
+> - **UI Toggle Key:** `RightShift` or floating 📊 button.
