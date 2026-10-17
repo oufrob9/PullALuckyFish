@@ -22,10 +22,10 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/oufrob9/PullALuckyFis
 - **🥚 Auto-Buy Eggs**: Automatically scans and purchases in-stock eggs while safely skipping Robux/Mythic items.
 - **📦 Auto-Buy Boxes**: Purchases Float Crates and Functional Objects Crates upon restock.
 - **🏷️ Auction House Direct-Buy**: Hourly direct-buy automation with proximity checks, prompt triggering, and strict action cooldown compliance (no bids).
-- **⏳ Smart Auto-Place**: Strictly verifies available incubation capacity before placing; supports priority ordering (High Tier First, Eggs First, Boxes First).
+- **⏳ Smart Auto-Place**: Strictly verifies available incubation capacity and base proximity before placing; supports priority ordering (High Tier First, Eggs First, Boxes First).
 - **🐣 Smart Auto-Hatch / Open**: Strictly verifies timer completion (`0:00` / Ready) before opening eggs and boxes.
-- **⏩ Auto-Skip Timers**: Automatically attempts available timer skips.
 - **🛡️ Soft Anti-AFK**: Integrates with `VirtualUser` to prevent the 20-minute idle disconnect without risky auto-rejoining.
+- **💾 Config Persistence**: Automatically saves and loads your preferences to/from the executor's workspace directory (`PullALuckyFish_Config.json`).
 - **🌸 Ultra-Modern UI/UX**: Custom glassmorphism Sakura theme, smooth spring/quad animations on toggles and tabs, minimizable floating pill, and safe instant teardown.
 
 ---

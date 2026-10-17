@@ -4,6 +4,8 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
+local HttpService = game:GetService("HttpService")
+local CollectionService = game:GetService("CollectionService")
 
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
@@ -87,16 +89,81 @@ local function formatNumber(n)
 end
 
 local Config = {
-    AutoCollectCash = true,
-    AutoBuyEggs = true,
-    AutoBuyBoxes = true,
+    AutoCollectCash = false,
+    AutoBuyEggs = false,
+    AutoBuyBoxes = false,
     AutoBuyAuctionHouse = false,
-    AutoPlace = true,
-    AutoOpen = true,
-    AutoSkipTimers = true,
-    AntiAFK = true,
+    AutoPlace = false,
+    AutoOpen = false,
+    AntiAFK = false,
     OpenPriority = "HighTierFirst"
 }
+
+local CONFIG_FILE = "PullALuckyFish_Config.json"
+
+local function saveSettings()
+    pcall(function()
+        if writefile then
+            local payload = {
+                AutoCollectCash = Config.AutoCollectCash,
+                AutoBuyEggs = Config.AutoBuyEggs,
+                AutoBuyBoxes = Config.AutoBuyBoxes,
+                AutoBuyAuctionHouse = Config.AutoBuyAuctionHouse,
+                AutoPlace = Config.AutoPlace,
+                AutoOpen = Config.AutoOpen,
+                AntiAFK = Config.AntiAFK,
+                OpenPriority = Config.OpenPriority
+            }
+            writefile(CONFIG_FILE, HttpService:JSONEncode(payload))
+        end
+    end)
+end
+
+local function loadSettings()
+    pcall(function()
+        if isfile and readfile and isfile(CONFIG_FILE) then
+            local raw = readfile(CONFIG_FILE)
+            if raw and #raw > 0 then
+                local data = HttpService:JSONDecode(raw)
+                if type(data) == "table" then
+                    for k, _ in pairs(Config) do
+                        if data[k] ~= nil and type(Config[k]) == type(data[k]) then
+                            Config[k] = data[k]
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+loadSettings()
+
+local function getPartCFrame(inst)
+    if not inst then return nil end
+    if inst:IsA("BasePart") then
+        return inst.CFrame
+    elseif inst:IsA("Attachment") then
+        return inst.WorldCFrame
+    elseif inst:IsA("Model") then
+        return inst:GetPivot()
+    elseif inst:IsA("ProximityPrompt") and inst.Parent then
+        return getPartCFrame(inst.Parent)
+    end
+    return nil
+end
+
+local function triggerPrompt(prompt)
+    if not prompt or not prompt.Enabled then return end
+    if fireproximityprompt then
+        pcall(function() fireproximityprompt(prompt) end)
+    end
+    pcall(function()
+        prompt:InputHoldBegin()
+        task.wait(prompt.HoldDuration or 0)
+        prompt:InputHoldEnd()
+    end)
+end
 
 local function getMaxPlacementLimit()
     local limit = 3
@@ -149,6 +216,11 @@ local function findPlayerBase()
             local ad = pbi.Adornee
             return ad:IsA("Model") and ad or ad.Parent
         end
+        local hi = pg:FindFirstChild("HomeIndicator", true)
+        if hi and hi:IsA("BillboardGui") and hi.Adornee then
+            local ad = hi.Adornee
+            return ad:IsA("Model") and ad or ad.Parent
+        end
     end
     for _, obj in ipairs(workspace:GetChildren()) do
         if obj:IsA("Model") or obj:IsA("Folder") then
@@ -164,24 +236,65 @@ local function findPlayerBase()
     return nil
 end
 
-local function getAuctionHousePart()
+local function getBaseCFrame()
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if pg then
+        local pbi = pg:FindFirstChild("PlayerBaseIndicator", true)
+        if pbi and pbi:IsA("BillboardGui") and pbi.Adornee then
+            local cf = getPartCFrame(pbi.Adornee)
+            if cf then return cf end
+        end
+        local hi = pg:FindFirstChild("HomeIndicator", true)
+        if hi and hi:IsA("BillboardGui") and hi.Adornee then
+            local cf = getPartCFrame(hi.Adornee)
+            if cf then return cf end
+        end
+        for _, g in ipairs(pg:GetChildren()) do
+            if g:IsA("BillboardGui") and (g.Name:find("LootboxTimer_") or g.Name:find("EggTimer_")) and g.Adornee then
+                local cf = getPartCFrame(g.Adornee)
+                if cf then return cf end
+            end
+        end
+    end
+    local base = findPlayerBase()
+    if base then
+        return getPartCFrame(base)
+    end
+    return nil
+end
+
+local function getAuctionHouseCFrame()
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if pg then
         local dot = pg:FindFirstChild("IndicatorDotBgui_AuctionHousePart", true)
         if dot and dot:IsA("BillboardGui") and dot.Adornee then
-            return dot.Adornee
+            local cf = getPartCFrame(dot.Adornee)
+            if cf then return cf, dot.Adornee end
+        end
+    end
+    for _, tagged in ipairs(CollectionService:GetTagged("AuctionHouse")) do
+        local cf = getPartCFrame(tagged)
+        if cf then return cf, tagged end
+        if tagged:IsA("ProximityPrompt") and tagged.Parent then
+            local pcf = getPartCFrame(tagged.Parent)
+            if pcf then return pcf, tagged.Parent end
         end
     end
     local part = workspace:FindFirstChild("AuctionHousePart", true)
-    if part and part:IsA("BasePart") then return part end
-    local CollectionService = game:GetService("CollectionService")
-    local tagged = CollectionService:GetTagged("AuctionHouse")
-    if tagged and #tagged > 0 then
-        local first = tagged[1]
-        if first:IsA("BasePart") then return first end
-        return first:FindFirstChildWhichIsA("BasePart")
+    if part then
+        local cf = getPartCFrame(part)
+        if cf then return cf, part end
     end
-    return nil
+    local configCf = nil
+    pcall(function()
+        local AHC = Shared:FindFirstChild("config") and Shared.config:FindFirstChild("AuctionHouseConfig")
+        local mod = AHC and require(AHC)
+        if mod and mod.Guide and mod.Guide.Position then
+            configCf = CFrame.new(mod.Guide.Position)
+        end
+    end)
+    if configCf then return configCf, nil end
+    return nil, nil
 end
 
 local function getFreeBaseSlot()
@@ -351,23 +464,44 @@ local function buyAuctionHouseDirect()
     pcall(function()
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        local auctionPart = getAuctionHousePart()
+        local ahCFrame, ahPart = getAuctionHouseCFrame()
         local savedCFrame = nil
-        if auctionPart and hrp then
-            local dist = (hrp.Position - auctionPart.Position).Magnitude
-            if dist > 12 then
+        if ahCFrame and hrp then
+            local dist = (hrp.Position - ahCFrame.Position).Magnitude
+            if dist > 8 then
                 savedCFrame = hrp.CFrame
-                hrp.CFrame = auctionPart.CFrame + Vector3.new(0, 3, 0)
-                task.wait(0.35)
+                hrp.CFrame = ahCFrame + Vector3.new(0, 2, 0)
+                task.wait(0.4)
             end
-            if fireproximityprompt then
-                for _, desc in ipairs(auctionPart:GetDescendants()) do
+            local function checkAndTriggerPrompts(parent)
+                if not parent then return end
+                for _, desc in ipairs(parent:GetDescendants()) do
                     if desc:IsA("ProximityPrompt") and desc.Enabled then
-                        pcall(function() fireproximityprompt(desc) end)
-                        task.wait(0.15)
+                        triggerPrompt(desc)
                     end
                 end
             end
+            if ahPart then
+                checkAndTriggerPrompts(ahPart)
+            end
+            for _, tagged in ipairs(CollectionService:GetTagged("AuctionHouse")) do
+                if tagged:IsA("ProximityPrompt") and tagged.Enabled then
+                    triggerPrompt(tagged)
+                end
+            end
+            for _, desc in ipairs(workspace:GetDescendants()) do
+                if desc:IsA("ProximityPrompt") and desc.Enabled then
+                    local pcf = desc.Parent and getPartCFrame(desc.Parent)
+                    if pcf and (pcf.Position - hrp.Position).Magnitude <= 12 then
+                        local act = tostring(desc.ActionText):lower()
+                        local obj = tostring(desc.ObjectText):lower()
+                        if act:find("open") or act:find("auction") or obj:find("auction") then
+                            triggerPrompt(desc)
+                        end
+                    end
+                end
+            end
+            task.wait(0.3)
         end
         if Remotes.GetAuctionHouseState and Remotes.GetAuctionHouseState.Call then
             pcall(function() Remotes.GetAuctionHouseState:Call():Await() end)
@@ -378,16 +512,41 @@ local function buyAuctionHouseDirect()
             if Remotes.AuctionBuy then
                 if Remotes.AuctionBuy.Call then
                     pcall(function() Remotes.AuctionBuy:Call(slotIdx):Await() end)
+                    pcall(function() Remotes.AuctionBuy:Call(slotIdx, 1):Await() end)
                     pcall(function() Remotes.AuctionBuy:Call(tostring(slotIdx)):Await() end)
                     pcall(function() Remotes.AuctionBuy:Call({ Slot = slotIdx }):Await() end)
+                    pcall(function() Remotes.AuctionBuy:Call({ slot = slotIdx }):Await() end)
+                    pcall(function() Remotes.AuctionBuy:Call({ Slot = slotIdx, Amount = 1 }):Await() end)
                 end
                 if Remotes.AuctionBuy.Fire then
                     pcall(function() Remotes.AuctionBuy:Fire(slotIdx) end)
+                    pcall(function() Remotes.AuctionBuy:Fire(slotIdx, 1) end)
                     pcall(function() Remotes.AuctionBuy:Fire(tostring(slotIdx)) end)
                     pcall(function() Remotes.AuctionBuy:Fire({ Slot = slotIdx }) end)
+                    pcall(function() Remotes.AuctionBuy:Fire({ slot = slotIdx }) end)
+                    pcall(function() Remotes.AuctionBuy:Fire({ Slot = slotIdx, Amount = 1 }) end)
                 end
             end
-            task.wait(0.8)
+            pcall(function()
+                local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+                if pg then
+                    local ahGui = pg:FindFirstChild("AuctionHouse", true)
+                    if ahGui then
+                        for _, desc in ipairs(ahGui:GetDescendants()) do
+                            if desc:IsA("TextButton") or desc:IsA("ImageButton") then
+                                local txt = tostring(desc.Text or desc.Name):lower()
+                                if txt:find("buy") or txt:find("purchase") or txt:find("claim") then
+                                    if firesignal then
+                                        pcall(function() firesignal(desc.MouseButton1Click) end)
+                                        pcall(function() firesignal(desc.Activated) end)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(0.85)
         end
         if savedCFrame and hrp and hrp.Parent then
             hrp.CFrame = savedCFrame
@@ -414,8 +573,6 @@ local function processOpenReadyItems()
                 end
             end
             task.wait(0.2)
-        elseif Config.AutoSkipTimers then
-            fireRemote(Remotes.SkipEggTimer, eggId)
         end
     end
     local placedBoxes = s.placedLootboxes or {}
@@ -433,8 +590,6 @@ local function processOpenReadyItems()
             end
             fireRemote(Remotes.ClaimFloatLootboxReward, boxId)
             task.wait(0.2)
-        elseif Config.AutoSkipTimers then
-            fireRemote(Remotes.SkipFloatLootboxTimer, boxId)
         end
     end
     local base = findPlayerBase()
@@ -443,7 +598,7 @@ local function processOpenReadyItems()
             if desc:IsA("ProximityPrompt") and desc.Enabled then
                 local act = tostring(desc.ActionText):lower()
                 if act:find("open") or act:find("hatch") or act:find("claim") then
-                    pcall(function() fireproximityprompt(desc) end)
+                    triggerPrompt(desc)
                 end
             end
         end
@@ -466,7 +621,7 @@ local RarityScore = {
 local lastPlaceTime = 0
 local function processPlaceItemsIfSpace()
     if not Config.AutoPlace then return end
-    if os.clock() - lastPlaceTime < 1.2 then return end
+    if os.clock() - lastPlaceTime < 1.4 then return end
     local hasSpace = hasSpaceToPlace()
     if not hasSpace then return end
     local freeSlot = getFreeBaseSlot()
@@ -505,24 +660,37 @@ local function processPlaceItemsIfSpace()
     local chosen = candidates[1]
     lastPlaceTime = os.clock()
     local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local baseCf = getBaseCFrame()
+    local savedCFrame = nil
+    if baseCf and hrp then
+        local dist = (hrp.Position - baseCf.Position).Magnitude
+        if dist > 12 then
+            savedCFrame = hrp.CFrame
+            hrp.CFrame = baseCf + Vector3.new(0, 3, 0)
+            task.wait(0.4)
+        end
+    end
     local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
     if backpack and char then
         local tool = backpack:FindFirstChild(chosen.Name)
         if tool and tool:IsA("Tool") then
             pcall(function() tool.Parent = char end)
-            task.wait(0.15)
+            task.wait(0.2)
         end
     end
-    local base = findPlayerBase()
-    if base and fireproximityprompt then
-        for _, desc in ipairs(base:GetDescendants()) do
+    if baseCf then
+        for _, desc in ipairs(workspace:GetDescendants()) do
             if desc:IsA("ProximityPrompt") and desc.Enabled then
-                local act = tostring(desc.ActionText):lower()
-                local obj = tostring(desc.ObjectText):lower()
-                if act:find("place") or act:find("put") or act:find("add") or act:find("incub") or
-                   obj:find("egg") or obj:find("crate") or obj:find("lootbox") or obj:find("stand") then
-                    pcall(function() fireproximityprompt(desc) end)
-                    task.wait(0.1)
+                local pPos = desc.Parent and getPartCFrame(desc.Parent)
+                if pPos and (pPos.Position - baseCf.Position).Magnitude <= 30 then
+                    local act = tostring(desc.ActionText):lower()
+                    local obj = tostring(desc.ObjectText):lower()
+                    if act:find("place") or act:find("put") or act:find("add") or act:find("incub") or
+                       obj:find("egg") or obj:find("crate") or obj:find("lootbox") or obj:find("stand") then
+                        triggerPrompt(desc)
+                        task.wait(0.1)
+                    end
                 end
             end
         end
@@ -562,6 +730,11 @@ local function processPlaceItemsIfSpace()
             end
         end
         fireRemote(Remotes.OpenLuckyblock, chosen.Name)
+    end
+    task.wait(0.3)
+    if savedCFrame and hrp and hrp.Parent then
+        hrp.CFrame = savedCFrame
+        task.wait(0.2)
     end
 end
 
@@ -961,7 +1134,7 @@ end
 local PageFarm  = createTab("Farm", "💰 Farm & Cash")
 local PageShop  = createTab("Shop", "🛍️ Shop & Auction")
 local PageOpen  = createTab("Open", "⏳ Place & Hatch")
-local PageExtra = createTab("Extra", "⚙️ Preferences")
+local PageExtra = createTab("Extra", "⚙️ Settings")
 
 local function makeCard(parent, title)
     local card = Instance.new("Frame")
@@ -1005,7 +1178,7 @@ local function makeCard(parent, title)
     return card
 end
 
-local function makeToggle(card, title, defaultVal, callback)
+local function makeToggle(card, title, configKey, callback)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 28)
     row.BackgroundTransparency = 1
@@ -1021,6 +1194,7 @@ local function makeToggle(card, title, defaultVal, callback)
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.Parent = row
 
+    local defaultVal = Config[configKey] or false
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(0, 40, 0, 20)
     btn.Position = UDim2.new(1, -40, 0.5, -10)
@@ -1047,11 +1221,13 @@ local function makeToggle(card, title, defaultVal, callback)
     local val = defaultVal
     btn.MouseButton1Click:Connect(function()
         val = not val
+        Config[configKey] = val
+        saveSettings()
         local targetColor = val and Theme.Accent or Theme.CardSub
         local targetPos = val and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
         TweenService:Create(btn, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = targetColor }):Play()
         TweenService:Create(knob, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Position = targetPos }):Play()
-        callback(val)
+        if callback then callback(val) end
         notify(title .. ": " .. (val and "ON" or "OFF"))
     end)
     return row
@@ -1108,18 +1284,14 @@ BalLabel.Text = "💰 Cash: Loading..."
 BalLabel.Parent = BalanceCard
 
 local CashAutoCard = makeCard(PageFarm, "Auto Cash Collection")
-makeToggle(CashAutoCard, "Auto Collect Cash (All Base Slots)", Config.AutoCollectCash, function(v)
-    Config.AutoCollectCash = v
-end)
+makeToggle(CashAutoCard, "Auto Collect Cash (All Base Slots)", "AutoCollectCash")
 makeButton(CashAutoCard, "⚡ Force Collect Now", function()
     collectCash()
     notify("Collected cash from all slots!")
 end)
 
 local EggCard = makeCard(PageShop, "Egg Shop (Skips Mythic Robux)")
-makeToggle(EggCard, "Auto Buy Eggs in Stock", Config.AutoBuyEggs, function(v)
-    Config.AutoBuyEggs = v
-end)
+makeToggle(EggCard, "Auto Buy Eggs in Stock", "AutoBuyEggs")
 local EggStockLabel = Instance.new("TextLabel")
 EggStockLabel.Size = UDim2.new(1, 0, 0, 16)
 EggStockLabel.BackgroundTransparency = 1
@@ -1131,9 +1303,7 @@ EggStockLabel.Text = "Stock: Scanning..."
 EggStockLabel.Parent = EggCard
 
 local BoxCard = makeCard(PageShop, "Box Shop (Floats & Functional Crates)")
-makeToggle(BoxCard, "Auto Buy Boxes & Functional Crates", Config.AutoBuyBoxes, function(v)
-    Config.AutoBuyBoxes = v
-end)
+makeToggle(BoxCard, "Auto Buy Boxes & Functional Crates", "AutoBuyBoxes")
 local BoxStockLabel = Instance.new("TextLabel")
 BoxStockLabel.Size = UDim2.new(1, 0, 0, 16)
 BoxStockLabel.BackgroundTransparency = 1
@@ -1145,8 +1315,7 @@ BoxStockLabel.Text = "Stock: Scanning..."
 BoxStockLabel.Parent = BoxCard
 
 local AuctionCard = makeCard(PageShop, "Auction House (1-Hour Direct Buy, No Bids)")
-makeToggle(AuctionCard, "Auto Buy Hourly Direct-Buy Items", Config.AutoBuyAuctionHouse, function(v)
-    Config.AutoBuyAuctionHouse = v
+makeToggle(AuctionCard, "Auto Buy Hourly Direct-Buy Items", "AutoBuyAuctionHouse", function(v)
     if v then task.spawn(buyAuctionHouseDirect) end
 end)
 local AuctionStatusLabel = Instance.new("TextLabel")
@@ -1165,15 +1334,8 @@ makeButton(AuctionCard, "⚡ Buy Auction House Stock Now", function()
 end)
 
 local OpenMasterCard = makeCard(PageOpen, "Automation Controls")
-makeToggle(OpenMasterCard, "Auto Place (Checks Space First)", Config.AutoPlace, function(v)
-    Config.AutoPlace = v
-end)
-makeToggle(OpenMasterCard, "Auto Open/Hatch (Checks Timer Finished)", Config.AutoOpen, function(v)
-    Config.AutoOpen = v
-end)
-makeToggle(OpenMasterCard, "Auto Skip Timers (If Available)", Config.AutoSkipTimers, function(v)
-    Config.AutoSkipTimers = v
-end)
+makeToggle(OpenMasterCard, "Auto Place (Checks Space & Base)", "AutoPlace")
+makeToggle(OpenMasterCard, "Auto Open/Hatch (Checks Timer Finished)", "AutoOpen")
 
 local SpaceStatusCard = makeCard(PageOpen, "Base Incubation Capacity & Timers")
 local SlotStatusLabel = Instance.new("TextLabel")
@@ -1209,28 +1371,38 @@ PriorityLabel.Font = Enum.Font.GothamSemibold
 PriorityLabel.TextSize = 11
 PriorityLabel.TextColor3 = Theme.AccentSoft
 PriorityLabel.TextXAlignment = Enum.TextXAlignment.Left
-PriorityLabel.Text = "Current Priority: High Tier First"
+local function getPriorityTitle(p)
+    if p == "EggsFirst" then return "Eggs First" end
+    if p == "BoxesFirst" then return "Boxes First" end
+    return "High Tier First"
+end
+PriorityLabel.Text = "Current Priority: " .. getPriorityTitle(Config.OpenPriority)
 PriorityLabel.Parent = PriorityCard
 
 makeButton(PriorityCard, "⭐ Priority: High Tier First (Mythic > Rare)", function()
     Config.OpenPriority = "HighTierFirst"
+    saveSettings()
     PriorityLabel.Text = "Current Priority: High Tier First"
-    notify("Priority set: High Tier First")
+    notify("Priority saved: High Tier First")
 end)
 makeButton(PriorityCard, "🥚 Priority: Eggs First (All Eggs > Boxes)", function()
     Config.OpenPriority = "EggsFirst"
+    saveSettings()
     PriorityLabel.Text = "Current Priority: Eggs First"
-    notify("Priority set: Eggs First")
+    notify("Priority saved: Eggs First")
 end)
 makeButton(PriorityCard, "📦 Priority: Boxes First (All Boxes > Eggs)", function()
     Config.OpenPriority = "BoxesFirst"
+    saveSettings()
     PriorityLabel.Text = "Current Priority: Boxes First"
-    notify("Priority set: Boxes First")
+    notify("Priority saved: Boxes First")
 end)
 
-local PrefCard = makeCard(PageExtra, "Safety & Utilities")
-makeToggle(PrefCard, "Soft Anti-AFK (VirtualUser)", Config.AntiAFK, function(v)
-    Config.AntiAFK = v
+local PrefCard = makeCard(PageExtra, "Preferences & Storage")
+makeToggle(PrefCard, "Soft Anti-AFK (VirtualUser)", "AntiAFK")
+makeButton(PrefCard, "💾 Save Settings to Workspace", function()
+    saveSettings()
+    notify("Config saved to PullALuckyFish_Config.json")
 end)
 makeButton(PrefCard, "🛑 Unload Script Cleanly", function()
     cleanShutdown()
