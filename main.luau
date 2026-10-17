@@ -1,25 +1,9 @@
---!nocheck
---[[
-  ========================================================================================
-  🌸 PULL A LUCKY FISH — SAKURA PREMIUM AUTOMATION SUITE
-  ========================================================================================
-  Features:
-    1. 💰 Auto-Collect Cash      - Smooth loop collecting cash from all base plots
-    2. 🥚 Auto-Buy Eggs          - Buys all in-game eggs in stock (skips Robux Mythic Egg)
-    3. 📦 Auto-Buy Boxes         - Buys Float Crates & Functional Objects Crates
-    4. 🏷️ Auto-Buy Auction House - Buys hourly restock direct-buy items (no bids!)
-    5. ⏳ Auto Place & Open      - STRICT slot limit check before placing (verifies free space)
-                                   STRICT timer completion check before opening (timer must be 0)
-    6. 🛑 Clean Teardown         - Gracefully terminates all background tasks upon closing
-    7. 🌸 Sleek Modern UI        - Full English, glassmorphism, responsive & minimizable
-  ========================================================================================
-]]
-
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
 
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
@@ -27,11 +11,8 @@ if not LocalPlayer then
     LocalPlayer = Players.LocalPlayer
 end
 
--- ========================================================================================
--- 1. CLEAN TEARDOWN & LIFECYCLE MANAGEMENT
--- ========================================================================================
-_G.__SAKURA_LUCKYFISH = (_G.__SAKURA_LUCKYFISH or 0) + 1
-local CURRENT_SESSION = _G.__SAKURA_LUCKYFISH
+_G.__SAKURA_MAIN = (_G.__SAKURA_MAIN or 0) + 1
+local CURRENT_SESSION = _G.__SAKURA_MAIN
 
 local isRunning = true
 local connections = {}
@@ -39,30 +20,21 @@ local connections = {}
 local function cleanShutdown()
     if not isRunning then return end
     isRunning = false
-    _G.__SAKURA_LUCKYFISH = (_G.__SAKURA_LUCKYFISH or 0) + 1
-
+    _G.__SAKURA_MAIN = (_G.__SAKURA_MAIN or 0) + 1
     for _, conn in ipairs(connections) do
         pcall(function() conn:Disconnect() end)
     end
     table.clear(connections)
-
-    local oldGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("SakuraLuckyFish_Clean")
+    local targetParent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
+    local oldGui = targetParent and targetParent:FindFirstChild("SakuraLuckyFish_Main")
     if oldGui then
         oldGui:Destroy()
     end
-    print("[SAKURA] Clean shutdown completed. All background tasks halted.")
 end
 
--- ========================================================================================
--- 2. GAME SERVICES & DATA BINDINGS
--- ========================================================================================
 local Shared = ReplicatedStorage:WaitForChild("shared", 10)
 local Client = ReplicatedStorage:WaitForChild("client", 10)
-
-if not Shared or not Client then
-    warn("[SAKURA] Game shared/client folders missing.")
-    return
-end
+if not Shared or not Client then return end
 
 local Remotes = require(Shared:WaitForChild("Remotes", 10))
 local CPD = require(Client:WaitForChild("ClientPlayerData", 10))
@@ -79,11 +51,9 @@ local function getState()
     return {}
 end
 
--- Universal Red Remote Caller
 local function fireRemote(remoteObj, ...)
     if not isRunning or not remoteObj then return false end
     local args = table.pack(...)
-
     if typeof(remoteObj) == "table" then
         if remoteObj.Fire then pcall(function() remoteObj:Fire(table.unpack(args, 1, args.n)) end) end
         if remoteObj.fire then pcall(function() remoteObj:fire(table.unpack(args, 1, args.n)) end) end
@@ -116,30 +86,18 @@ local function formatNumber(n)
     return string.format("%.2f %s", n, SUFFIXES[i])
 end
 
--- ========================================================================================
--- 3. CONFIGURATION STATE
--- ========================================================================================
 local Config = {
-    -- Auto Collect Cash
-    AutoCollectCash     = true,
-
-    -- Auto Buy Shops
-    AutoBuyEggs         = true,
-    AutoBuyBoxes        = true,
+    AutoCollectCash = true,
+    AutoBuyEggs = true,
+    AutoBuyBoxes = true,
     AutoBuyAuctionHouse = false,
-
-    -- Auto Open & Hatch
-    AutoPlace           = true,  -- Places items when space is available
-    AutoOpen            = true,  -- Opens items ONLY when timer has finished
-    AutoSkipTimers      = true,  -- Attempts timer skip if available
-    OpenPriority        = "HighTierFirst", -- "HighTierFirst", "EggsFirst", "BoxesFirst"
+    AutoPlace = true,
+    AutoOpen = true,
+    AutoSkipTimers = true,
+    AntiAFK = true,
+    OpenPriority = "HighTierFirst"
 }
 
--- ========================================================================================
--- 4. TIMER & PLACEMENT CAPACITY VERIFICATION HELPERS
--- ========================================================================================
-
--- Maximum incubation slots on base
 local function getMaxPlacementLimit()
     local limit = 3
     pcall(function()
@@ -155,7 +113,6 @@ local function getMaxPlacementLimit()
     return limit or 3
 end
 
--- Count how many items are currently placed on the base
 local function getPlacedItemCount()
     local s = getState()
     local placedEggs = s.placedEggs or {}
@@ -163,8 +120,6 @@ local function getPlacedItemCount()
     local count = 0
     for _ in pairs(placedEggs) do count = count + 1 end
     for _ in pairs(placedBoxes) do count = count + 1 end
-
-    -- Check visual BillboardGuis as well to avoid desync
     pcall(function()
         local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
         if pg then
@@ -177,20 +132,16 @@ local function getPlacedItemCount()
             if guiCount > count then count = guiCount end
         end
     end)
-
     return count
 end
 
--- Check if there is free space before placing
 local function hasSpaceToPlace()
     local currentCount = getPlacedItemCount()
     local maxLimit = getMaxPlacementLimit()
     return currentCount < maxLimit, currentCount, maxLimit
 end
 
--- Locate player's base in Workspace
 local function findPlayerBase()
-    -- 1. Try PlayerBaseIndicator adornee in PlayerGui
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if pg then
         local pbi = pg:FindFirstChild("PlayerBaseIndicator", true)
@@ -199,8 +150,6 @@ local function findPlayerBase()
             return ad:IsA("Model") and ad or ad.Parent
         end
     end
-
-    -- 2. Try direct Workspace matching
     for _, obj in ipairs(workspace:GetChildren()) do
         if obj:IsA("Model") or obj:IsA("Folder") then
             if obj.Name:find(LocalPlayer.Name) or obj.Name:find(tostring(LocalPlayer.UserId)) then
@@ -212,11 +161,9 @@ local function findPlayerBase()
             end
         end
     end
-
     return nil
 end
 
--- Locate AuctionHousePart in Workspace
 local function getAuctionHousePart()
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if pg then
@@ -225,10 +172,8 @@ local function getAuctionHousePart()
             return dot.Adornee
         end
     end
-
     local part = workspace:FindFirstChild("AuctionHousePart", true)
     if part and part:IsA("BasePart") then return part end
-
     local CollectionService = game:GetService("CollectionService")
     local tagged = CollectionService:GetTagged("AuctionHouse")
     if tagged and #tagged > 0 then
@@ -236,27 +181,24 @@ local function getAuctionHousePart()
         if first:IsA("BasePart") then return first end
         return first:FindFirstChildWhichIsA("BasePart")
     end
-
     return nil
 end
 
--- Find next free slot index on base
 local function getFreeBaseSlot()
     local s = getState()
     local occupied = {}
-    for id, d in pairs(s.placedEggs or {}) do
+    for _, d in pairs(s.placedEggs or {}) do
         if type(d) == "table" then
             local sl = d.Slot or d.slot or d.Index or d.index or d.Stand or d.stand
             if sl and tonumber(sl) then occupied[tonumber(sl)] = true end
         end
     end
-    for id, d in pairs(s.placedLootboxes or {}) do
+    for _, d in pairs(s.placedLootboxes or {}) do
         if type(d) == "table" then
             local sl = d.Slot or d.slot or d.Index or d.index or d.Stand or d.stand
             if sl and tonumber(sl) then occupied[tonumber(sl)] = true end
         end
     end
-
     local maxLimit = getMaxPlacementLimit()
     for i = 1, maxLimit do
         if not occupied[i] then
@@ -266,34 +208,24 @@ local function getFreeBaseSlot()
     return 1
 end
 
--- Parse textual countdown from visual labels
 local function parseTimerText(text)
     if not text or text == "" then return nil end
     local low = string.lower(text)
-
-    -- Explicit ready / open strings
     if low:find("open") or low:find("ready") or low:find("claim") or low:find("hatch") or low == "0:00" or low == "00:00" or low == "0s" then
-        return 0 -- Timer is 100% finished
+        return 0
     end
-
-    -- Format mm:ss or hh:mm:ss
     local m, s = low:match("(%d+):(%d+)")
     if m and s then
         return tonumber(m) * 60 + tonumber(s)
     end
-
-    -- Format Xs or Xm
     local sec = low:match("(%d+)%s*s")
     if sec then return tonumber(sec) end
     local min = low:match("(%d+)%s*m")
     if min then return tonumber(min) * 60 end
-
     return nil
 end
 
--- Strict check: Is the egg/lootbox timer 100% finished?
 local function isTimerFinished(id, data, category)
-    -- 1. Check visual GUI in PlayerGui for real-time certainty
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if pg then
         local guiName = (category == "Egg" and "EggTimer_" or "LootboxTimer_") .. tostring(id)
@@ -304,17 +236,15 @@ local function isTimerFinished(id, data, category)
                     local remSec = parseTimerText(desc.Text)
                     if remSec ~= nil then
                         if remSec > 0 then
-                            return false -- Timer STILL RUNNING! Do NOT open.
+                            return false
                         else
-                            return true  -- Label explicitly says Ready/Open/0:00!
+                            return true
                         end
                     end
                 end
             end
         end
     end
-
-    -- 2. Check placed model ProximityPrompt in Workspace (if ready to open, prompt is Enabled)
     local base = findPlayerBase()
     if base then
         for _, desc in ipairs(base:GetDescendants()) do
@@ -328,45 +258,31 @@ local function isTimerFinished(id, data, category)
             end
         end
     end
-
-    -- 3. Check state data
     if type(data) == "table" then
-        -- Explicit ready flag
         if data.Ready == true or data.ready == true or data.isReady == true then
             return true
         end
-
-        -- Remaining seconds in state
         local rem = data.RemainingSeconds or data.remainingSeconds or data.remaining or data.Timer or data.timer
         if rem ~= nil and tonumber(rem) then
             if tonumber(rem) > 0 then
-                return false -- Timer STILL RUNNING in state! Do NOT open.
+                return false
             else
-                return true  -- State says 0 or negative
+                return true
             end
         end
-
-        -- Timestamp comparison
         local now = workspace:GetServerTimeNow() or os.time()
         local endT = data.endTime or data.EndTime or data.readyAt or data.finishTime
         if endT and tonumber(endT) then
             if tonumber(endT) > now then
-                return false -- End time is in the future! Do NOT open.
+                return false
             else
-                return true  -- End time has passed!
+                return true
             end
         end
     end
-
-    -- Safety default: If we cannot verify timer is 0, do NOT open yet
     return false
 end
 
--- ========================================================================================
--- 5. AUTOMATION ACTIONS
--- ========================================================================================
-
--- Cash Collection
 local function collectCash()
     local s = getState()
     local slots = s.baseSlots or {}
@@ -379,17 +295,14 @@ local function collectCash()
     fireRemote(Remotes.RequestUseAutoCollect, true)
 end
 
--- Buy Eggs (Skips Mythic Robux Egg)
 local function buyEggs()
     if not Config.AutoBuyEggs then return end
     local s = getState()
     local items = s.eggShopItems or {}
     local sold = s.eggShopSoldSlots or {}
-
     for slotIdx = 1, 3 do
         local eggName = items[slotIdx]
         local isSold = sold[slotIdx] == true
-
         if eggName and not isSold then
             if eggName ~= "MythicEgg" and not tostring(eggName):lower():find("mythic") then
                 fireRemote(Remotes.BuyEgg, slotIdx)
@@ -402,23 +315,19 @@ local function buyEggs()
     end
 end
 
--- Buy Boxes (Float Crates & Functional Objects Crates)
 local function buyBoxes()
     if not Config.AutoBuyBoxes then return end
     local s = getState()
     local items = s.lootboxShopItems or {}
     local sold = s.lootboxShopSoldSlots or {}
-
     for slotIdx = 1, 3 do
         local boxName = items[slotIdx]
         local isSold = sold[slotIdx] == true
-
         if boxName and not isSold then
             fireRemote(Remotes.BuyFloatLootbox, slotIdx)
             fireRemote(Remotes.BuyFloatLootbox, tostring(slotIdx))
             fireRemote(Remotes.BuyFloatLootbox, boxName)
             fireRemote(Remotes.BuyFloatLootbox, slotIdx, boxName)
-
             if boxName == "FunctionalObjectsCrate" or tostring(boxName):find("Functional") then
                 fireRemote(Remotes.BuyDecorationsStoreItem, "FunctionalObjectsCrate")
                 fireRemote(Remotes.BuyDecorationsStoreItem, slotIdx)
@@ -427,7 +336,6 @@ local function buyBoxes()
             task.wait(0.2)
         end
     end
-
     local decoStock = s.decorationsStoreStock or {}
     if decoStock["FunctionalObjectsCrate"] ~= 0 then
         fireRemote(Remotes.BuyDecorationsStoreItem, "FunctionalObjectsCrate")
@@ -437,30 +345,21 @@ local function buyBoxes()
 end
 
 local isAuctionBusy = false
-local lastAuctionCheck = 0
-
--- Auto Buy Auction House Direct-Buy Items (Hourly Restock, NO BIDS)
 local function buyAuctionHouseDirect()
     if not Config.AutoBuyAuctionHouse or isAuctionBusy then return end
     isAuctionBusy = true
-    lastAuctionCheck = os.clock()
-
     pcall(function()
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         local auctionPart = getAuctionHousePart()
         local savedCFrame = nil
-
-        -- 1. Ensure Player is within Proximity (MaxDistance = 10 studs check on server)
         if auctionPart and hrp then
             local dist = (hrp.Position - auctionPart.Position).Magnitude
             if dist > 12 then
                 savedCFrame = hrp.CFrame
                 hrp.CFrame = auctionPart.CFrame + Vector3.new(0, 3, 0)
-                task.wait(0.35) -- allow server replication
+                task.wait(0.35)
             end
-
-            -- 2. Trigger ProximityPrompt on AuctionHousePart if present to register interaction
             if fireproximityprompt then
                 for _, desc in ipairs(auctionPart:GetDescendants()) do
                     if desc:IsA("ProximityPrompt") and desc.Enabled then
@@ -470,19 +369,12 @@ local function buyAuctionHouseDirect()
                 end
             end
         end
-
-        -- 3. Query current state from server
         if Remotes.GetAuctionHouseState and Remotes.GetAuctionHouseState.Call then
             pcall(function() Remotes.GetAuctionHouseState:Call():Await() end)
             task.wait(0.2)
         end
-
-        -- 4. Buy Direct-Buy Slots:
-        -- Slots 1..4: Classic rotation pool (4 slots)
-        -- Slots 5..6: Limited rotation pool (2 slots)
         for slotIdx = 1, 6 do
             if not isRunning or not Config.AutoBuyAuctionHouse then break end
-
             if Remotes.AuctionBuy then
                 if Remotes.AuctionBuy.Call then
                     pcall(function() Remotes.AuctionBuy:Call(slotIdx):Await() end)
@@ -495,30 +387,22 @@ local function buyAuctionHouseDirect()
                     pcall(function() Remotes.AuctionBuy:Fire({ Slot = slotIdx }) end)
                 end
             end
-            print(string.format("[SAKURA] Auction direct buy attempted for slot #%d", slotIdx))
-            task.wait(0.8) -- strictly respect ActionCooldown = 0.75s!
+            task.wait(0.8)
         end
-
-        -- 5. Return Player safely to original position
         if savedCFrame and hrp and hrp.Parent then
             hrp.CFrame = savedCFrame
             task.wait(0.2)
         end
     end)
-
     isAuctionBusy = false
 end
 
--- Open/Hatch Ready Items ONLY when timer is finished
 local function processOpenReadyItems()
     if not Config.AutoOpen then return end
     local s = getState()
-
-    -- 1. Check Placed Eggs
     local placedEggs = s.placedEggs or {}
     for eggId, data in pairs(placedEggs) do
         if isTimerFinished(eggId, data, "Egg") then
-            -- Timer is 100% finished: Safe to hatch!
             if Remotes.HatchEgg then
                 if Remotes.HatchEgg.Call then
                     pcall(function() Remotes.HatchEgg:Call(eggId):Await() end)
@@ -534,12 +418,9 @@ local function processOpenReadyItems()
             fireRemote(Remotes.SkipEggTimer, eggId)
         end
     end
-
-    -- 2. Check Placed Lootboxes
     local placedBoxes = s.placedLootboxes or {}
     for boxId, data in pairs(placedBoxes) do
         if isTimerFinished(boxId, data, "Box") then
-            -- Timer is 100% finished: Safe to open!
             if Remotes.OpenFloatLootbox then
                 if Remotes.OpenFloatLootbox.Call then
                     pcall(function() Remotes.OpenFloatLootbox:Call(boxId):Await() end)
@@ -556,8 +437,6 @@ local function processOpenReadyItems()
             fireRemote(Remotes.SkipFloatLootboxTimer, boxId)
         end
     end
-
-    -- 3. Check any base ProximityPrompt ready to Open/Hatch
     local base = findPlayerBase()
     if base and fireproximityprompt then
         for _, desc in ipairs(base:GetDescendants()) do
@@ -571,38 +450,29 @@ local function processOpenReadyItems()
     end
 end
 
--- Place Items ONLY if there is free space on base
 local RarityScore = {
-    ["MythicFloatCrate"]     = 100,
-    ["OceanEgg"]             = 90,
-    ["LegendaryFloatCrate"]  = 80,
-    ["EpicFloatCrate"]       = 70,
-    ["ForestEgg"]            = 60,
-    ["RareFloatCrate"]       = 50,
-    ["FarmEgg"]              = 40,
-    ["CommonFloatCrate"]     = 30,
+    ["MythicFloatCrate"] = 100,
+    ["OceanEgg"] = 90,
+    ["LegendaryFloatCrate"] = 80,
+    ["EpicFloatCrate"] = 70,
+    ["ForestEgg"] = 60,
+    ["RareFloatCrate"] = 50,
+    ["FarmEgg"] = 40,
+    ["CommonFloatCrate"] = 30,
     ["FunctionalObjectsCrate"] = 25,
-    ["CatFloatCrate"]        = 20,
+    ["CatFloatCrate"] = 20
 }
 
 local lastPlaceTime = 0
 local function processPlaceItemsIfSpace()
     if not Config.AutoPlace then return end
-    if os.clock() - lastPlaceTime < 1.2 then return end -- Cooldown between placements
-
-    -- STRICT CHECK: Is there free space available?
-    local hasSpace, currentCount, maxLimit = hasSpaceToPlace()
-    if not hasSpace then
-        return -- BASE IS FULL! Do NOT place anything.
-    end
-
+    if os.clock() - lastPlaceTime < 1.2 then return end
+    local hasSpace = hasSpaceToPlace()
+    if not hasSpace then return end
     local freeSlot = getFreeBaseSlot()
-
-    -- Select candidates from inventory
     local s = getState()
     local inv = s.inventory or {}
     local candidates = {}
-
     for key, item in pairs(inv) do
         if type(item) == "table" then
             local name = item.ConfigName or tostring(key)
@@ -610,7 +480,6 @@ local function processPlaceItemsIfSpace()
             if count > 0 then
                 local isEgg = (item.Category == "Egg") or name:find("Egg")
                 local isBox = (item.Category == "FloatLootbox") or name:find("Crate") or name:find("Lootbox")
-
                 if isEgg and name ~= "MythicEgg" then
                     table.insert(candidates, { Name = name, Type = "Egg", Score = RarityScore[name] or 35 })
                 elseif isBox then
@@ -619,10 +488,7 @@ local function processPlaceItemsIfSpace()
             end
         end
     end
-
     if #candidates == 0 then return end
-
-    -- Sort candidates by selected Priority
     if Config.OpenPriority == "HighTierFirst" then
         table.sort(candidates, function(a, b) return a.Score > b.Score end)
     elseif Config.OpenPriority == "EggsFirst" then
@@ -636,11 +502,8 @@ local function processPlaceItemsIfSpace()
             return a.Type == "Box"
         end)
     end
-
     local chosen = candidates[1]
     lastPlaceTime = os.clock()
-
-    -- Step A: If the item exists as a Tool in Backpack, equip it to Character
     local char = LocalPlayer.Character
     local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
     if backpack and char then
@@ -650,8 +513,6 @@ local function processPlaceItemsIfSpace()
             task.wait(0.15)
         end
     end
-
-    -- Step B: Fire ProximityPrompt on empty incubator/stand if available
     local base = findPlayerBase()
     if base and fireproximityprompt then
         for _, desc in ipairs(base:GetDescendants()) do
@@ -666,8 +527,6 @@ local function processPlaceItemsIfSpace()
             end
         end
     end
-
-    -- Step C: Remote Placement with full parameter variants
     if chosen.Type == "Egg" then
         local remote = Remotes.PlaceEgg
         if remote then
@@ -685,7 +544,6 @@ local function processPlaceItemsIfSpace()
                 pcall(function() remote:Fire({ ConfigName = chosen.Name, Slot = freeSlot }) end)
             end
         end
-        print(string.format("[SAKURA] Placed Egg: %s into Slot: %d", chosen.Name, freeSlot))
     else
         local remote = Remotes.PlaceFloatLootbox
         if remote then
@@ -704,84 +562,75 @@ local function processPlaceItemsIfSpace()
             end
         end
         fireRemote(Remotes.OpenLuckyblock, chosen.Name)
-        print(string.format("[SAKURA] Placed Box: %s into Slot: %d", chosen.Name, freeSlot))
     end
 end
 
--- ========================================================================================
--- 6. MAIN BACKGROUND WORKER
--- ========================================================================================
+table.insert(connections, LocalPlayer.Idled:Connect(function()
+    if Config.AntiAFK and VirtualUser then
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+            task.wait(1)
+            VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        end)
+    end
+end))
+
 task.spawn(function()
     local auctionTimer = 0
-    while isRunning and _G.__SAKURA_LUCKYFISH == CURRENT_SESSION do
-        if Config.AutoCollectCash then
-            pcall(collectCash)
-        end
-        if Config.AutoBuyEggs then
-            pcall(buyEggs)
-        end
-        if Config.AutoBuyBoxes then
-            pcall(buyBoxes)
-        end
-
-        -- Step 1: Open items where timer is 100% finished
+    while isRunning and _G.__SAKURA_MAIN == CURRENT_SESSION do
+        if Config.AutoCollectCash then pcall(collectCash) end
+        if Config.AutoBuyEggs then pcall(buyEggs) end
+        if Config.AutoBuyBoxes then pcall(buyBoxes) end
         pcall(processOpenReadyItems)
-
-        -- Step 2: Place new item ONLY if space is available
         pcall(processPlaceItemsIfSpace)
-
-        -- Check Auction House direct buy every 60 seconds (hourly restock)
         auctionTimer = auctionTimer + 1.5
         if auctionTimer >= 60 then
             auctionTimer = 0
-            if Config.AutoBuyAuctionHouse then
-                pcall(buyAuctionHouseDirect)
-            end
+            if Config.AutoBuyAuctionHouse then pcall(buyAuctionHouseDirect) end
         end
-
         task.wait(1.5)
     end
 end)
 
--- ========================================================================================
--- 7. MODERN SAKURA UI (FULL ENGLISH, SLEEK & COMPACT)
--- ========================================================================================
 local Theme = {
-    Background = Color3.fromRGB(19, 14, 20),
-    Sidebar    = Color3.fromRGB(25, 18, 26),
-    Card       = Color3.fromRGB(30, 22, 32),
-    CardSub    = Color3.fromRGB(42, 30, 44),
+    Background = Color3.fromRGB(18, 14, 22),
+    Sidebar    = Color3.fromRGB(24, 18, 28),
+    Card       = Color3.fromRGB(28, 21, 33),
+    CardSub    = Color3.fromRGB(38, 28, 45),
+    CardActive = Color3.fromRGB(50, 36, 60),
     Accent     = Color3.fromRGB(255, 107, 139),
-    AccentSoft = Color3.fromRGB(255, 175, 195),
+    AccentSoft = Color3.fromRGB(255, 180, 200),
+    AccentGlow = Color3.fromRGB(255, 140, 168),
     Text       = Color3.fromRGB(255, 245, 248),
-    TextDim    = Color3.fromRGB(205, 170, 188),
+    TextDim    = Color3.fromRGB(200, 168, 185),
     Green      = Color3.fromRGB(115, 230, 155),
     Red        = Color3.fromRGB(255, 95, 120),
     Stroke     = Color3.fromRGB(255, 107, 139),
+    StrokeSub  = Color3.fromRGB(60, 44, 68)
 }
 
 local targetParent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "SakuraLuckyFish_Clean"
+ScreenGui.Name = "SakuraLuckyFish_Main"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = targetParent
 
--- Teardown Hook
 table.insert(connections, ScreenGui.Destroying:Connect(cleanShutdown))
 
--- Main Frame
 local Main = Instance.new("Frame")
 Main.Name = "SakuraMain"
-Main.Size = UDim2.new(0, 560, 0, 420)
-Main.Position = UDim2.new(0.5, -280, 0.5, -210)
+Main.Size = UDim2.new(0, 580, 0, 430)
+Main.Position = UDim2.new(0.5, -290, 0.5, -215)
 Main.BackgroundColor3 = Theme.Background
 Main.BorderSizePixel = 0
 Main.Active = true
+Main.ClipsDescendants = true
 Main.Parent = ScreenGui
 
 local MainCorner = Instance.new("UICorner")
-MainCorner.CornerRadius = UDim.new(0, 12)
+MainCorner.CornerRadius = UDim.new(0, 14)
 MainCorner.Parent = Main
 
 local MainStroke = Instance.new("UIStroke")
@@ -789,7 +638,6 @@ MainStroke.Color = Theme.Stroke
 MainStroke.Thickness = 1.4
 MainStroke.Parent = Main
 
--- Dragging
 local dragging, dragStart, startPos
 table.insert(connections, Main.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -801,36 +649,71 @@ table.insert(connections, Main.InputBegan:Connect(function(input)
         end)
     end
 end))
+
 table.insert(connections, UserInputService.InputChanged:Connect(function(input)
     if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - dragStart
-        Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        local camera = workspace.CurrentCamera
+        local vp = camera and camera.ViewportSize or Vector2.new(1920, 1080)
+        local newX = math.clamp(startPos.X.Offset + delta.X, -vp.X * 0.5 + 20, vp.X * 0.5 - 20)
+        local newY = math.clamp(startPos.Y.Offset + delta.Y, -vp.Y * 0.5 + 20, vp.Y * 0.5 - 20)
+        Main.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
     end
 end))
 
--- Top Bar
 local TopBar = Instance.new("Frame")
-TopBar.Size = UDim2.new(1, 0, 0, 40)
+TopBar.Size = UDim2.new(1, 0, 0, 42)
 TopBar.BackgroundColor3 = Theme.Sidebar
 TopBar.BorderSizePixel = 0
 TopBar.Parent = Main
 
 local TopCorner = Instance.new("UICorner")
-TopCorner.CornerRadius = UDim.new(0, 12)
+TopCorner.CornerRadius = UDim.new(0, 14)
 TopCorner.Parent = TopBar
 
 local TopTitle = Instance.new("TextLabel")
-TopTitle.Size = UDim2.new(1, -90, 1, 0)
-TopTitle.Position = UDim2.new(0, 14, 0, 0)
+TopTitle.Size = UDim2.new(1, -140, 1, 0)
+TopTitle.Position = UDim2.new(0, 16, 0, 0)
 TopTitle.BackgroundTransparency = 1
-TopTitle.Text = "🌸 SAKURA • Lucky Fish Automation"
+TopTitle.Text = "🌸 SAKURA • Pull A Lucky Fish"
 TopTitle.Font = Enum.Font.GothamBold
 TopTitle.TextSize = 13
 TopTitle.TextColor3 = Theme.Text
 TopTitle.TextXAlignment = Enum.TextXAlignment.Left
 TopTitle.Parent = TopBar
 
--- Close & Minimize Buttons
+local StatusPill = Instance.new("Frame")
+StatusPill.Size = UDim2.new(0, 70, 0, 22)
+StatusPill.Position = UDim2.new(1, -156, 0.5, -11)
+StatusPill.BackgroundColor3 = Theme.CardSub
+StatusPill.Parent = TopBar
+
+local StatusCorner = Instance.new("UICorner")
+StatusCorner.CornerRadius = UDim.new(1, 0)
+StatusCorner.Parent = StatusPill
+
+local StatusDot = Instance.new("Frame")
+StatusDot.Size = UDim2.new(0, 6, 0, 6)
+StatusDot.Position = UDim2.new(0, 8, 0.5, -3)
+StatusDot.BackgroundColor3 = Theme.Green
+StatusDot.BorderSizePixel = 0
+StatusDot.Parent = StatusPill
+
+local StatusDotCorner = Instance.new("UICorner")
+StatusDotCorner.CornerRadius = UDim.new(1, 0)
+StatusDotCorner.Parent = StatusDot
+
+local StatusText = Instance.new("TextLabel")
+StatusText.Size = UDim2.new(1, -18, 1, 0)
+StatusText.Position = UDim2.new(0, 18, 0, 0)
+StatusText.BackgroundTransparency = 1
+StatusText.Text = "ACTIVE"
+StatusText.Font = Enum.Font.GothamBold
+StatusText.TextSize = 9
+StatusText.TextColor3 = Theme.Green
+StatusText.TextXAlignment = Enum.TextXAlignment.Left
+StatusText.Parent = StatusPill
+
 local CloseBtn = Instance.new("TextButton")
 CloseBtn.Size = UDim2.new(0, 26, 0, 26)
 CloseBtn.Position = UDim2.new(1, -34, 0.5, -13)
@@ -839,6 +722,7 @@ CloseBtn.Text = "✕"
 CloseBtn.Font = Enum.Font.GothamBold
 CloseBtn.TextSize = 11
 CloseBtn.TextColor3 = Theme.AccentSoft
+CloseBtn.AutoButtonColor = false
 CloseBtn.Parent = TopBar
 local CloseCorner = Instance.new("UICorner")
 CloseCorner.CornerRadius = UDim.new(0, 6)
@@ -853,40 +737,143 @@ MinBtn.Text = "—"
 MinBtn.Font = Enum.Font.GothamBold
 MinBtn.TextSize = 11
 MinBtn.TextColor3 = Theme.AccentSoft
+MinBtn.AutoButtonColor = false
 MinBtn.Parent = TopBar
 local MinCorner = Instance.new("UICorner")
 MinCorner.CornerRadius = UDim.new(0, 6)
 MinCorner.Parent = MinBtn
 
--- Floating Sakura Button
 local FloatBtn = Instance.new("TextButton")
-FloatBtn.Size = UDim2.new(0, 42, 0, 42)
-FloatBtn.Position = UDim2.new(0, 15, 0.5, -21)
+FloatBtn.Size = UDim2.new(0, 44, 0, 44)
+FloatBtn.Position = UDim2.new(0, 16, 0.5, -22)
 FloatBtn.BackgroundColor3 = Theme.Background
 FloatBtn.Text = "🌸"
 FloatBtn.TextSize = 22
 FloatBtn.Visible = false
+FloatBtn.Active = true
 FloatBtn.Parent = ScreenGui
+
 local FloatCorner = Instance.new("UICorner")
 FloatCorner.CornerRadius = UDim.new(1, 0)
 FloatCorner.Parent = FloatBtn
+
 local FloatStroke = Instance.new("UIStroke")
 FloatStroke.Color = Theme.Accent
-FloatStroke.Thickness = 1.5
+FloatStroke.Thickness = 1.6
 FloatStroke.Parent = FloatBtn
-FloatBtn.MouseButton1Click:Connect(function()
-    Main.Visible = true
-    FloatBtn.Visible = false
-end)
-MinBtn.MouseButton1Click:Connect(function()
-    Main.Visible = false
-    FloatBtn.Visible = true
-end)
 
--- Sidebar Navigation
+local fDragging, fDragStart, fStartPos
+table.insert(connections, FloatBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        fDragging = true
+        fDragStart = input.Position
+        fStartPos = FloatBtn.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then fDragging = false end
+        end)
+    end
+end))
+
+table.insert(connections, UserInputService.InputChanged:Connect(function(input)
+    if fDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - fDragStart
+        FloatBtn.Position = UDim2.new(fStartPos.X.Scale, fStartPos.X.Offset + delta.X, fStartPos.Y.Scale, fStartPos.Y.Offset + delta.Y)
+    end
+end))
+
+local function toggleUI(visible)
+    if visible == nil then visible = not Main.Visible end
+    if visible then
+        FloatBtn.Visible = false
+        Main.Visible = true
+        Main.Size = UDim2.new(0, 500, 0, 370)
+        TweenService:Create(Main, TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.new(0, 580, 0, 430)
+        }):Play()
+    else
+        local tween = TweenService:Create(Main, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Size = UDim2.new(0, 500, 0, 370)
+        })
+        tween:Play()
+        tween.Completed:Connect(function()
+            if not Main.Visible then return end
+            Main.Visible = false
+            FloatBtn.Visible = true
+        end)
+    end
+end
+
+FloatBtn.MouseButton1Click:Connect(function() toggleUI(true) end)
+MinBtn.MouseButton1Click:Connect(function() toggleUI(false) end)
+
+table.insert(connections, UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        toggleUI()
+    end
+end))
+
+local Toast = Instance.new("Frame")
+Toast.Size = UDim2.new(0, 240, 0, 28)
+Toast.Position = UDim2.new(0.5, -120, 1, -38)
+Toast.BackgroundColor3 = Theme.CardActive
+Toast.BorderSizePixel = 0
+Toast.Visible = false
+Toast.ZIndex = 10
+Toast.Parent = Main
+
+local ToastCorner = Instance.new("UICorner")
+ToastCorner.CornerRadius = UDim.new(0, 8)
+ToastCorner.Parent = Toast
+
+local ToastStroke = Instance.new("UIStroke")
+ToastStroke.Color = Theme.Accent
+ToastStroke.Thickness = 1
+ToastStroke.Parent = Toast
+
+local ToastLabel = Instance.new("TextLabel")
+ToastLabel.Size = UDim2.new(1, 0, 1, 0)
+ToastLabel.BackgroundTransparency = 1
+ToastLabel.Font = Enum.Font.GothamSemibold
+ToastLabel.TextSize = 11
+ToastLabel.TextColor3 = Theme.Text
+ToastLabel.ZIndex = 11
+ToastLabel.Parent = Toast
+
+local toastThread
+local function notify(msg)
+    if toastThread then task.cancel(toastThread) end
+    toastThread = task.spawn(function()
+        ToastLabel.Text = msg
+        Toast.Position = UDim2.new(0.5, -120, 1, -20)
+        Toast.BackgroundTransparency = 1
+        ToastLabel.TextTransparency = 1
+        Toast.Visible = true
+        TweenService:Create(Toast, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Position = UDim2.new(0.5, -120, 1, -38),
+            BackgroundTransparency = 0
+        }):Play()
+        TweenService:Create(ToastLabel, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            TextTransparency = 0
+        }):Play()
+        task.wait(1.6)
+        local out = TweenService:Create(Toast, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Position = UDim2.new(0.5, -120, 1, -20),
+            BackgroundTransparency = 1
+        })
+        TweenService:Create(ToastLabel, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            TextTransparency = 1
+        }):Play()
+        out:Play()
+        out.Completed:Connect(function()
+            Toast.Visible = false
+        end)
+    end)
+end
+
 local Sidebar = Instance.new("Frame")
-Sidebar.Size = UDim2.new(0, 140, 1, -48)
-Sidebar.Position = UDim2.new(0, 8, 0, 44)
+Sidebar.Size = UDim2.new(0, 144, 1, -50)
+Sidebar.Position = UDim2.new(0, 8, 0, 46)
 Sidebar.BackgroundColor3 = Theme.Sidebar
 Sidebar.BorderSizePixel = 0
 Sidebar.Parent = Main
@@ -905,10 +892,9 @@ SidePad.PaddingLeft = UDim.new(0, 6)
 SidePad.PaddingRight = UDim.new(0, 6)
 SidePad.Parent = Sidebar
 
--- Content Pages Container
 local Container = Instance.new("Frame")
-Container.Size = UDim2.new(1, -164, 1, -48)
-Container.Position = UDim2.new(0, 156, 0, 44)
+Container.Size = UDim2.new(1, -168, 1, -50)
+Container.Position = UDim2.new(0, 160, 0, 46)
 Container.BackgroundTransparency = 1
 Container.Parent = Main
 
@@ -932,7 +918,7 @@ local function createTab(id, title)
     pageLayout.Parent = page
 
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 32)
+    btn.Size = UDim2.new(1, 0, 0, 34)
     btn.BackgroundColor3 = Theme.Card
     btn.Text = title
     btn.Font = Enum.Font.GothamSemibold
@@ -942,13 +928,13 @@ local function createTab(id, title)
     btn.Parent = Sidebar
 
     local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 6)
+    btnCorner.CornerRadius = UDim.new(0, 8)
     btnCorner.Parent = btn
 
     local btnStroke = Instance.new("UIStroke")
     btnStroke.Color = Theme.Accent
     btnStroke.Thickness = 0.8
-    btnStroke.Transparency = 0.7
+    btnStroke.Transparency = 0.8
     btnStroke.Parent = btn
 
     Tabs[id] = page
@@ -956,16 +942,15 @@ local function createTab(id, title)
 
     btn.MouseButton1Click:Connect(function()
         for tId, p in pairs(Tabs) do
-            p.Visible = (tId == id)
+            local isTarget = (tId == id)
+            p.Visible = isTarget
             local b = TabBtns[tId]
-            if tId == id then
-                b.Button.BackgroundColor3 = Theme.CardSub
-                b.Button.TextColor3 = Theme.AccentSoft
-                b.Stroke.Transparency = 0
+            if isTarget then
+                TweenService:Create(b.Button, TweenInfo.new(0.18), { BackgroundColor3 = Theme.CardActive, TextColor3 = Theme.AccentSoft }):Play()
+                TweenService:Create(b.Stroke, TweenInfo.new(0.18), { Transparency = 0 }):Play()
             else
-                b.Button.BackgroundColor3 = Theme.Card
-                b.Button.TextColor3 = Theme.TextDim
-                b.Stroke.Transparency = 0.7
+                TweenService:Create(b.Button, TweenInfo.new(0.18), { BackgroundColor3 = Theme.Card, TextColor3 = Theme.TextDim }):Play()
+                TweenService:Create(b.Stroke, TweenInfo.new(0.18), { Transparency = 0.8 }):Play()
             end
         end
     end)
@@ -975,9 +960,9 @@ end
 
 local PageFarm  = createTab("Farm", "💰 Farm & Cash")
 local PageShop  = createTab("Shop", "🛍️ Shop & Auction")
-local PageOpen  = createTab("Open", "⏳ Auto Place & Open")
+local PageOpen  = createTab("Open", "⏳ Place & Hatch")
+local PageExtra = createTab("Extra", "⚙️ Preferences")
 
--- Card Builder
 local function makeCard(parent, title)
     local card = Instance.new("Frame")
     card.Size = UDim2.new(1, -6, 0, 0)
@@ -987,14 +972,19 @@ local function makeCard(parent, title)
     card.Parent = parent
 
     local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
+    corner.CornerRadius = UDim.new(0, 10)
     corner.Parent = card
 
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Theme.StrokeSub
+    stroke.Thickness = 0.8
+    stroke.Parent = card
+
     local pad = Instance.new("UIPadding")
-    pad.PaddingTop = UDim.new(0, 8)
-    pad.PaddingBottom = UDim.new(0, 8)
-    pad.PaddingLeft = UDim.new(0, 10)
-    pad.PaddingRight = UDim.new(0, 10)
+    pad.PaddingTop = UDim.new(0, 10)
+    pad.PaddingBottom = UDim.new(0, 10)
+    pad.PaddingLeft = UDim.new(0, 12)
+    pad.PaddingRight = UDim.new(0, 12)
     pad.Parent = card
 
     local layout = Instance.new("UIListLayout")
@@ -1015,15 +1005,14 @@ local function makeCard(parent, title)
     return card
 end
 
--- Toggle Switch Builder
 local function makeToggle(card, title, defaultVal, callback)
     local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 26)
+    row.Size = UDim2.new(1, 0, 0, 28)
     row.BackgroundTransparency = 1
     row.Parent = card
 
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -46, 1, 0)
+    lbl.Size = UDim2.new(1, -48, 1, 0)
     lbl.BackgroundTransparency = 1
     lbl.Text = title
     lbl.Font = Enum.Font.Gotham
@@ -1033,8 +1022,8 @@ local function makeToggle(card, title, defaultVal, callback)
     lbl.Parent = row
 
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 36, 0, 18)
-    btn.Position = UDim2.new(1, -36, 0.5, -9)
+    btn.Size = UDim2.new(0, 40, 0, 20)
+    btn.Position = UDim2.new(1, -40, 0.5, -10)
     btn.BackgroundColor3 = defaultVal and Theme.Accent or Theme.CardSub
     btn.Text = ""
     btn.AutoButtonColor = false
@@ -1045,8 +1034,8 @@ local function makeToggle(card, title, defaultVal, callback)
     bCorner.Parent = btn
 
     local knob = Instance.new("Frame")
-    knob.Size = UDim2.new(0, 14, 0, 14)
-    knob.Position = defaultVal and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = defaultVal and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
     knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
     knob.BorderSizePixel = 0
     knob.Parent = btn
@@ -1058,56 +1047,61 @@ local function makeToggle(card, title, defaultVal, callback)
     local val = defaultVal
     btn.MouseButton1Click:Connect(function()
         val = not val
-        if val then
-            btn.BackgroundColor3 = Theme.Accent
-            knob.Position = UDim2.new(1, -16, 0.5, -7)
-        else
-            btn.BackgroundColor3 = Theme.CardSub
-            knob.Position = UDim2.new(0, 2, 0.5, -7)
-        end
+        local targetColor = val and Theme.Accent or Theme.CardSub
+        local targetPos = val and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+        TweenService:Create(btn, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = targetColor }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Position = targetPos }):Play()
         callback(val)
+        notify(title .. ": " .. (val and "ON" or "OFF"))
     end)
     return row
 end
 
--- Action Button Builder
 local function makeButton(card, text, onClick)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 28)
+    btn.Size = UDim2.new(1, 0, 0, 30)
     btn.BackgroundColor3 = Theme.CardSub
     btn.Text = text
     btn.Font = Enum.Font.GothamSemibold
     btn.TextSize = 11
     btn.TextColor3 = Theme.Text
+    btn.AutoButtonColor = false
     btn.Parent = card
 
     local bCorner = Instance.new("UICorner")
-    bCorner.CornerRadius = UDim.new(0, 6)
+    bCorner.CornerRadius = UDim.new(0, 8)
     bCorner.Parent = btn
 
     local bStroke = Instance.new("UIStroke")
     bStroke.Color = Theme.Accent
     bStroke.Thickness = 0.8
+    bStroke.Transparency = 0.6
     bStroke.Parent = btn
 
+    btn.MouseEnter:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = Theme.CardActive }):Play()
+        TweenService:Create(bStroke, TweenInfo.new(0.15), { Transparency = 0.2 }):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = Theme.CardSub }):Play()
+        TweenService:Create(bStroke, TweenInfo.new(0.15), { Transparency = 0.6 }):Play()
+    end)
+
     btn.MouseButton1Click:Connect(function()
-        btn.BackgroundColor3 = Theme.Accent
+        TweenService:Create(btn, TweenInfo.new(0.1), { BackgroundColor3 = Theme.Accent }):Play()
         task.wait(0.1)
-        btn.BackgroundColor3 = Theme.CardSub
+        TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = Theme.CardActive }):Play()
         onClick()
     end)
     return btn
 end
 
--- ========================================================================================
--- 📑 TAB 1: FARM & CASH
--- ========================================================================================
 local BalanceCard = makeCard(PageFarm, "Live Balance")
 local BalLabel = Instance.new("TextLabel")
-BalLabel.Size = UDim2.new(1, 0, 0, 18)
+BalLabel.Size = UDim2.new(1, 0, 0, 20)
 BalLabel.BackgroundTransparency = 1
 BalLabel.Font = Enum.Font.GothamBold
-BalLabel.TextSize = 12
+BalLabel.TextSize = 13
 BalLabel.TextColor3 = Theme.Green
 BalLabel.TextXAlignment = Enum.TextXAlignment.Left
 BalLabel.Text = "💰 Cash: Loading..."
@@ -1119,11 +1113,9 @@ makeToggle(CashAutoCard, "Auto Collect Cash (All Base Slots)", Config.AutoCollec
 end)
 makeButton(CashAutoCard, "⚡ Force Collect Now", function()
     collectCash()
+    notify("Collected cash from all slots!")
 end)
 
--- ========================================================================================
--- 📑 TAB 2: SHOP & AUCTION HOUSE
--- ========================================================================================
 local EggCard = makeCard(PageShop, "Egg Shop (Skips Mythic Robux)")
 makeToggle(EggCard, "Auto Buy Eggs in Stock", Config.AutoBuyEggs, function(v)
     Config.AutoBuyEggs = v
@@ -1168,12 +1160,10 @@ AuctionStatusLabel.Text = "Stock: Ready (checks hourly restock, direct buy only)
 AuctionStatusLabel.Parent = AuctionCard
 
 makeButton(AuctionCard, "⚡ Buy Auction House Stock Now", function()
+    notify("Attempting Auction House direct buy...")
     task.spawn(buyAuctionHouseDirect)
 end)
 
--- ========================================================================================
--- 📑 TAB 3: AUTO PLACE & OPEN (WITH STRICT CHECKS)
--- ========================================================================================
 local OpenMasterCard = makeCard(PageOpen, "Automation Controls")
 makeToggle(OpenMasterCard, "Auto Place (Checks Space First)", Config.AutoPlace, function(v)
     Config.AutoPlace = v
@@ -1208,6 +1198,7 @@ TimerStatusLabel.Parent = SpaceStatusCard
 
 makeButton(SpaceStatusCard, "⚡ Force Open Ready Items Now (Timer = 0s only)", function()
     processOpenReadyItems()
+    notify("Checked and opened all ready items!")
 end)
 
 local PriorityCard = makeCard(PageOpen, "Placement Priority Order")
@@ -1224,28 +1215,35 @@ PriorityLabel.Parent = PriorityCard
 makeButton(PriorityCard, "⭐ Priority: High Tier First (Mythic > Rare)", function()
     Config.OpenPriority = "HighTierFirst"
     PriorityLabel.Text = "Current Priority: High Tier First"
+    notify("Priority set: High Tier First")
 end)
 makeButton(PriorityCard, "🥚 Priority: Eggs First (All Eggs > Boxes)", function()
     Config.OpenPriority = "EggsFirst"
     PriorityLabel.Text = "Current Priority: Eggs First"
+    notify("Priority set: Eggs First")
 end)
 makeButton(PriorityCard, "📦 Priority: Boxes First (All Boxes > Eggs)", function()
     Config.OpenPriority = "BoxesFirst"
     PriorityLabel.Text = "Current Priority: Boxes First"
+    notify("Priority set: Boxes First")
 end)
 
--- ========================================================================================
--- 🔄 LIVE STATS UPDATER LOOP
--- ========================================================================================
+local PrefCard = makeCard(PageExtra, "Safety & Utilities")
+makeToggle(PrefCard, "Soft Anti-AFK (VirtualUser)", Config.AntiAFK, function(v)
+    Config.AntiAFK = v
+end)
+makeButton(PrefCard, "🛑 Unload Script Cleanly", function()
+    cleanShutdown()
+end)
+
 task.spawn(function()
-    while isRunning and _G.__SAKURA_LUCKYFISH == CURRENT_SESSION do
+    while isRunning and _G.__SAKURA_MAIN == CURRENT_SESSION do
         pcall(function()
             local s = getState()
             local m = s.money or 0
             local g = s.gems or 0
             BalLabel.Text = string.format("💰 Cash: %s  |  💎 Gems: %s", formatNumber(m), formatNumber(g))
 
-            -- Update Egg Stock
             local eItems = s.eggShopItems or {}
             local eSold = s.eggShopSoldSlots or {}
             local eTxt = {}
@@ -1254,7 +1252,6 @@ task.spawn(function()
             end
             EggStockLabel.Text = table.concat(eTxt, " | ")
 
-            -- Update Box Stock
             local bItems = s.lootboxShopItems or {}
             local bSold = s.lootboxShopSoldSlots or {}
             local bTxt = {}
@@ -1263,7 +1260,6 @@ task.spawn(function()
             end
             BoxStockLabel.Text = table.concat(bTxt, " | ")
 
-            -- Update Space & Timer Verification Status
             local hasSpace, currentCount, maxLimit = hasSpaceToPlace()
             if hasSpace then
                 SlotStatusLabel.Text = string.format("Slots: %d / %d Used  ✔ (%d Free Space)", currentCount, maxLimit, maxLimit - currentCount)
@@ -1291,10 +1287,6 @@ task.spawn(function()
     end
 end)
 
--- Initialize First Tab
 Tabs["Farm"].Visible = true
-TabBtns["Farm"].Button.BackgroundColor3 = Theme.CardSub
-TabBtns["Farm"].Button.TextColor3 = Theme.AccentSoft
-TabBtns["Farm"].Stroke.Transparency = 0
-
-print("🌸 [SAKURA] Loaded with strict capacity and timer verification!")
+TweenService:Create(TabBtns["Farm"].Button, TweenInfo.new(0.18), { BackgroundColor3 = Theme.CardActive, TextColor3 = Theme.AccentSoft }):Play()
+TweenService:Create(TabBtns["Farm"].Stroke, TweenInfo.new(0.18), { Transparency = 0 }):Play()
