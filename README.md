@@ -4,7 +4,48 @@ Sleek, high-performance Luau scripts for Roblox.
 
 ---
 
-## ⚡ 1. Sakura Automation Suite
+## 🎃 1. AutoCauldron Suite (Interface KyriLib)
+
+Interface modulaire ultra-complète, haute performance et robuste pour l'événement Chaudron d'Halloween & l'automatisation du jeu.
+
+### 🚀 Exécution Simple (1-Liner)
+
+Dans n'importe quel executor Roblox (Solara, Wave, Delta, Celery, Fluxus, etc.) :
+
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/oufrob9/PullALuckyFish/main/Loader.luau"))()
+```
+
+*Note : Si vous avez téléchargé le script localement dans votre dossier `workspace`, le loader le détecte automatiquement et charge les fichiers en local sans latence.*
+
+```lua
+loadstring(readfile("Menu/Loader.luau"))()
+```
+
+### 📋 Fonctionnalités par Onglet
+
+- **Accueil (`flame`)** :
+  - Statut en direct (position, état plongée, Candy, Mythic Egg, cible, compteurs).
+  - Actions rapides : Lancer manuel, Déblocage anti-stuck immédiat, Téléportation au chaudron.
+- **Halloween (`ghost`)** :
+  - Plongée du Chaudron : Auto-Cast et Auto-Pilote (Steer) haute précision.
+  - Priorité absolue Mythic Egg (verrouillage instantané dès apparition) + Mode strict optionnel.
+  - Pilotage & Esquive : Répulsion dynamique des Monstres & Mines, pré-alignement en descente, réglage de la marge de sécurité.
+  - Magasin d'Halloween : Auto-Buy Spooky Egg, Cursed Egg, Pet Egg (stock 3), Flotteur Divin, Base Haunted Manor, Balai de Sorcière, Canne Faux de la Mort.
+  - Améliorations du Chaudron : Machine, Chance (Luck), Capacité, Poids des poissons avec réserve de sécurité de Candy.
+- **Visuels (`eye`)** :
+  - ESP Chaudron 3D (Bounding Box de zone).
+  - Affichage des loots & poissons avec distance et nom.
+  - Affichage des monstres avec alerte DANGER.
+  - Silhouettes Chams colorées et filtre de rareté minimale.
+- **Misc (`settings`)** :
+  - Boutique Décoration : Auto-Buy des caisses déco (`FunctionalObjectsCrate` et détection dynamique de stock par probe).
+  - Sécurité : Anti-AFK (protection 20 min), Auto-Reconnexion (serveur privé VIP ou serveur public), TP au chaudron à chaque réapparition.
+  - Maintenance : Sauvegarde des configurations, réinitialisation des remotes, déchargement propre du script (`Cleanup`).
+
+---
+
+## ⚡ 2. Sakura Automation Suite
 
 Complete automation for **Pull A Lucky Fish** (Auto-Collect Cash, Auto-Buy Eggs & Boxes, Auction House Direct-Buy, Smart Auto-Place & Open, Soft Anti-AFK, Config Persistence).
 
@@ -16,7 +57,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/oufrob9/PullALuckyFis
 
 ---
 
-## 📊 2. Universal Full Game Dumper (Export to TXT)
+## 📊 3. Universal Full Game Dumper (Export to TXT)
 
 Full game introspection dumper: scans all native & custom Remotes (Red, Knit, etc.), ModuleScripts & configs, real-time client state / inventory, Workspace entities, ProximityPrompts, and interfaces.
 
@@ -26,26 +67,5 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/oufrob9/PullALuckyFis
 
 > **Automatic Export:**
 > - Runs immediately upon execution.
-> - Saves directly to your executor workspace as `game_dump.txt` (e.g. `AppData\Local\Potassium\workspace\game_dump.txt`).
-> - Automatically copies the full dump to your clipboard so you can paste (`Ctrl+V`) into Notepad instantly!
-> - **UI Toggle Key:** `RightShift` or floating 📊 button.
-
----
-
-## 🎃 3. Halloween Turbo Farm (Update UPDATEhalloween)
-
-Dedicated ultra-optimized auto-farm for the official **Halloween 2026 Event**:
-- **Auto Stir Cauldron:** Instantly powers up your float weight up to 617,190 kg for max dive depth.
-- **Auto Cauldron Dive:** Casts into the witch's pot shaft, hooking all Halloween fish & candy loot (`Pumpkin Fish`, `Bat Fin`, `Zombie Koi`, `Hex Kraken`, `Cauldron King`, `Candy Sack`).
-- **Auto Event Upgrades:** Auto-purchases Cauldron Tier (Machine), Capacity, Luck, and Heavier Fish.
-- **Auto Halloween Shop:** Auto-buys Spooky Egg, Cursed Egg, Witch's Broom Mount, Death Scythe Rod (x33 Luck), and Halloween Base.
-- **Auto Corrupted Ritual:** Interacts with the altar to sacrifice 3x 100%+ fish and summon `CorruptedElMaja`.
-- **Auto Collect & Hatch:** Vacuum-collects all map candies & pumpkins; auto-places and hatches event eggs.
-- **Instant Teleports:** 1-click teleport to Halloween Island, Stir Cauldron, Fishing Pier, Event Shop, and Ritual Altar.
-
-```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/oufrob9/PullALuckyFish/main/halloween.luau"))()
-```
-
-> **UI Toggle:** Floating 🎃 button.
-
+> - Saves directly to your executor workspace as `game_dump.txt`.
+> - Automatically copies the full dump to your clipboard.
