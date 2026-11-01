@@ -122,3 +122,4 @@ local ok, err = pcall(initLoader)
 if not ok then
     warn("[AutoCauldron Error] " .. tostring(err))
 end
+
